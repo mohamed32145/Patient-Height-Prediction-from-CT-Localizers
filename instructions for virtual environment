@@ -1,0 +1,10 @@
+
+# If using PowerShell:
+
+height_prediction_pro\Scripts\Activate.ps1  /:Activate the environment
+deactivate   /: deactivate the env
+pip list  /:  list the installed packages
+
+
+pip freeze > requirements.txt    /:Generates a list of all installed packages and their versions to a file.
+pip install -r requirements.txt  /: Installs all packages listed in a requirements.txt file

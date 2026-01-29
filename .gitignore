@@ -1,0 +1,16 @@
+
+
+
+# Python cache
+__pycache__/
+
+# PyCharm project settings
+.idea/
+
+# Virtual environment
+.venv/
+torch_env/
+
+# Data folder (if large or generated)
+experiments_height_pytorch/
+height_prediction_pro/
