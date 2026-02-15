@@ -1,131 +1,221 @@
+
 import cv2
-import torch
 import numpy as np
-import pandas as pd
 import nibabel as nib
+import torch
+from torch.utils.data import Dataset
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from pathlib import Path
-from torch.utils.data import Dataset
-from sklearn.model_selection import GroupShuffleSplit
-from tqdm import tqdm
 
-import config  # Import your config file
+from config import (
+    IMG_SIZE, WIN_MIN, WIN_MAX, CROP_WIDTH, THRESHOLD_VALUE,
+    AUG_HORIZONTAL_FLIP_PROB, AUG_SHIFT_LIMIT, AUG_SCALE_LIMIT,
+    AUG_ROTATE_LIMIT, AUG_SHIFT_SCALE_ROTATE_PROB,
+    AUG_BRIGHTNESS_CONTRAST_PROB
+)
 
-def resolve_nifti_dir(localizer_dir_str: str) -> Path | None:
-    """Slice after 'rambam_nifti_localizers' and join to NIFTI_ROOT."""
-    if not isinstance(localizer_dir_str, str):
-        return None
-    # Handle both forward and backward slashes
-    parts = localizer_dir_str.replace('\\', '/').split('rambam_nifti_localizers')
-    if len(parts) < 2:
-        return None
 
-    tail = parts[-1].strip('/ ')
-    candidate = config.NIFTI_ROOT / tail
-    return candidate if candidate.exists() else None
+class LocalizerDataset(Dataset):
+    """
+    Dataset for loading and preprocessing CT Localizer images.
 
-def pick_nifti_file(nifti_dir: Path) -> Path | None:
-    files = sorted(list(nifti_dir.glob('*.nii*')))
-    return files[0] if files else None
+    Features:
+    - Loads NIfTI files
+    - Applies bone windowing
+    - Standardizes orientation (vertical body)
+    - Crops to spine region
+    - Resizes with padding
+    - Applies augmentations for training
+    """
 
-def load_and_split_data():
-    if not config.EXCEL_PATH.exists():
-        raise FileNotFoundError(f"Excel file not found at {config.EXCEL_PATH}")
-    if not config.NIFTI_ROOT.exists():
-        raise FileNotFoundError(f"NIFTI root not found at {config.NIFTI_ROOT}")
+    def __init__(self, df, is_train=False):
+        """
+        Args:
+            df: DataFrame with columns ['Patient_ID', 'nifti_path', 'height_cm']
+            is_train: Whether to apply training augmentations
+        """
+        self.df = df
+        self.is_train = is_train
 
-    print("Loading Excel...")
-    df = pd.read_excel(config.EXCEL_PATH, engine='openpyxl')
-    df.columns = [str(c).strip() for c in df.columns]
-
-    rows = []
-    print("Resolving NIfTI paths...")
-    for _, r in tqdm(df.iterrows(), total=len(df)):
-        pid = str(r['Patient_ID'])
-        height_cm = float(r['Height'])
-        d = resolve_nifti_dir(r['Localizer_Path_NIfTI'])
-        if d is None:
-            continue
-        f = pick_nifti_file(d)
-        if f is None:
-            continue
-        rows.append({'Patient_ID': pid, 'nifti_path': str(f), 'height_cm': height_cm})
-
-    data_df = pd.DataFrame(rows)
-    print(f"Resolved NIfTI files for {len(data_df)} rows")
-
-    # Splitting logic
-    groups = data_df['Patient_ID'].values
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=42)
-    train_val_idx, test_idx = next(gss.split(data_df, groups=groups))
-    train_val_df = data_df.iloc[train_val_idx].reset_index(drop=True)
-    test_df = data_df.iloc[test_idx].reset_index(drop=True)
-
-    gss2 = GroupShuffleSplit(n_splits=1, test_size=0.1765, random_state=42)
-    train_idx, val_idx = next(gss2.split(train_val_df, groups=train_val_df['Patient_ID'].values))
-    train_df = train_val_df.iloc[train_idx].reset_index(drop=True)
-    val_df = train_val_df.iloc[val_idx].reset_index(drop=True)
-
-    print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
-    return train_df, val_df, test_df
-
-class NiftiXRVDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, training: bool = False):
-        self.df = df.reset_index(drop=True)
-        self.training = training
-
-        if self.training:
+        # Define augmentation pipeline
+        if self.is_train:
             self.transform = A.Compose([
-                A.HorizontalFlip(p=0.5),
-                A.Rotate(limit=5, p=0.5),
-                A.RandomBrightnessContrast(p=0.2),
+                A.HorizontalFlip(p=AUG_HORIZONTAL_FLIP_PROB),
+                A.ShiftScaleRotate(
+                    shift_limit=AUG_SHIFT_LIMIT,
+                    scale_limit=AUG_SCALE_LIMIT,
+                    rotate_limit=AUG_ROTATE_LIMIT,
+                    border_mode=cv2.BORDER_CONSTANT,
+                    value=0,
+                    p=AUG_SHIFT_SCALE_ROTATE_PROB
+                ),
+                A.RandomBrightnessContrast(p=AUG_BRIGHTNESS_CONTRAST_PROB),
                 ToTensorV2()
             ])
         else:
-            self.transform = A.Compose([ToTensorV2()])
-
-    def resize_pad(self, img):
-        h, w = img.shape
-        scale = config.IMG_SIZE / max(h, w)
-        new_h, new_w = int(h * scale), int(w * scale)
-        resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        final_img = np.zeros((config.IMG_SIZE, config.IMG_SIZE), dtype=np.float32)
-        y_offset = (config.IMG_SIZE - new_h) // 2
-        x_offset = (config.IMG_SIZE - new_w) // 2
-        final_img[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_img
-        return final_img
+            self.transform = A.Compose([
+                ToTensorV2()
+            ])
 
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        path = Path(row['nifti_path'])
-        height_cm = float(row['height_cm'])
+    def standardize_orientation(self, img_2d):
+        """
+        Detects if the body is horizontal and rotates it to vertical.
 
-        nii = nib.load(str(path))
-        data = nii.get_fdata()
-        img2d = np.squeeze(data)
-        if img2d.ndim > 2:
-            img2d = img2d[..., img2d.shape[-1] // 2]
+        Args:
+            img_2d: 2D numpy array of the image
 
-        img2d = np.clip(img2d, config.WIN_MIN, config.WIN_MAX)
-        img2d = (img2d - config.WIN_MIN) / (config.WIN_MAX - config.WIN_MIN)
-        img2d = self.resize_pad(img2d)
+        Returns:
+            Tuple of (rotated_image, was_rotated)
+        """
+        img_u8 = cv2.normalize(img_2d, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        augmented = self.transform(image=img2d)
-        img_t = augmented['image']
+        # Threshold to find body (ignores bed lines)
+        _, thresh = cv2.threshold(img_u8, THRESHOLD_VALUE, 255, cv2.THRESH_BINARY)
 
-        # XRV Scaling [-1024, 1024]
-        img_t = (img_t * 2048) - 1024
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return img_2d, False
 
-        zooms = nii.header.get_zooms()
-        if len(zooms) >= 2:
-            spacing = np.array(zooms[:2], dtype=np.float32)
+        # Find largest contour (body)
+        largest_contour = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+
+        # If wider than tall, rotate 90 degrees
+        if w > h:
+            img_rotated = cv2.rotate(img_2d, cv2.ROTATE_90_CLOCKWISE)
+            return img_rotated, True
+
+        return img_2d, False
+
+    def crop_to_spine(self, img_2d):
+        """
+        Centers on the spine and takes a narrow crop to exclude bed rails.
+
+        Args:
+            img_2d: 2D numpy array of the image
+
+        Returns:
+            Cropped image centered on spine
+        """
+        img_u8 = cv2.normalize(img_2d, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, thresh = cv2.threshold(img_u8, THRESHOLD_VALUE, 255, cv2.THRESH_BINARY)
+
+        # Find center of mass (spine location)
+        M = cv2.moments(thresh)
+        if M["m00"] == 0:
+            center_x = img_2d.shape[1] // 2
         else:
-            spacing = np.array([1.0, 1.0], dtype=np.float32)
-        spacing_t = torch.tensor(spacing, dtype=torch.float32)
-        target = torch.tensor([height_cm], dtype=torch.float32)
+            center_x = int(M["m10"] / M["m00"])
 
-        return img_t, spacing_t, target
+        # Find vertical extent
+        row_sums = np.sum(thresh, axis=1)
+        non_zero_rows = np.where(row_sums > 0)[0]
+        if len(non_zero_rows) > 0:
+            y_top, y_bottom = non_zero_rows[0], non_zero_rows[-1]
+        else:
+            y_top, y_bottom = 0, img_2d.shape[0]
+
+        # Crop horizontally around center
+        h, w = img_2d.shape
+        x_start = max(0, center_x - CROP_WIDTH // 2)
+        x_end = min(w, center_x + CROP_WIDTH // 2)
+
+        return img_2d[y_top:y_bottom, x_start:x_end]
+
+    def resize_pad(self, img):
+        """
+        Resize image maintaining aspect ratio and pad to square.
+
+        Args:
+            img: 2D numpy array
+
+        Returns:
+            Resized and padded image of size (IMG_SIZE, IMG_SIZE)
+        """
+        h, w = img.shape
+        scale = IMG_SIZE / max(h, w)
+        new_h, new_w = int(h * scale), int(w * scale)
+
+        resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Create padded output
+        final_img = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
+        y_offset = (IMG_SIZE - new_h) // 2
+        x_offset = (IMG_SIZE - new_w) // 2
+        final_img[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_img
+
+        return final_img
+
+    def __getitem__(self, idx):
+        """
+        Load and preprocess a single sample.
+
+        Returns:
+            Tuple of (image_tensor, spacing_tensor, height_label)
+        """
+        row = self.df.iloc[idx]
+        nifti_path = row['nifti_path']
+        height_label = float(row['height_cm'])
+
+        try:
+            # 1. Load NIfTI
+            nii = nib.load(nifti_path)
+            img_data = nii.get_fdata()
+            header = nii.header
+
+            # Handle 3D volumes - extract 2D slice
+            if img_data.ndim >= 3:
+                if img_data.shape[-1] == 1:
+                    img_data = img_data.squeeze()
+                else:
+                    img_data = np.max(img_data, axis=-1)
+
+            if img_data.ndim != 2:
+                if img_data.ndim > 2:
+                    img_data = img_data[..., img_data.shape[-1] // 2]
+                else:
+                    img_data = np.squeeze(img_data)
+
+            # 2. Extract pixel spacing metadata
+            spacing = header.get_zooms()[:2]
+
+            # 3. Apply bone windowing and normalize to [0, 1]
+            img_data = np.clip(img_data, WIN_MIN, WIN_MAX)
+            img_data = (img_data - WIN_MIN) / (WIN_MAX - WIN_MIN)
+
+            # 4. Standardize orientation (rotate horizontal bodies to vertical)
+            img_data, rotated = self.standardize_orientation(img_data)
+
+            # Important: If rotated, swap pixel spacing dimensions
+            if rotated:
+                spacing = (spacing[1], spacing[0])
+
+            spacing = torch.tensor(spacing, dtype=torch.float32)
+
+            # 5. Crop to spine region (now that body is vertical)
+            img_data = self.crop_to_spine(img_data)
+
+            # 6. Resize with padding
+            img_data = self.resize_pad(img_data)
+
+            # 7. Apply augmentations
+            img_data = img_data.astype(np.float32)[:, :, np.newaxis]
+            augmented = self.transform(image=img_data)
+            img_tensor = augmented['image']
+
+            # Convert grayscale to 3-channel (for ResNet)
+            img_tensor = img_tensor.repeat(3, 1, 1)
+
+            return img_tensor, spacing, torch.tensor(height_label, dtype=torch.float32)
+
+        except Exception as e:
+            print(f"Error loading {nifti_path}: {e}")
+            # Return zero tensors on error
+            return (
+                torch.zeros((3, IMG_SIZE, IMG_SIZE)),
+                torch.zeros(2),
+                torch.tensor(0.0)
+            )

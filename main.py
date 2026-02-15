@@ -1,98 +1,179 @@
+
 import torch
 from torch.utils.data import DataLoader
+import numpy as np
 
-import config
-from dataset import load_and_split_data, NiftiXRVDataset
-from model import XRVHeightRegressor
-from utils import run_epoch, visualize_sample,visualize_dataset_samples
+from config import (
+    NUM_FOLDS, BATCH_SIZE, WEIGHTS_PATH, RESULTS_EXCEL_PATH,
+    setup_directories, get_device
+)
+from utils import (
+    prepare_dataset, create_fold_splits, get_fold_dataframes,
+    save_results_to_excel
+)
+from dataset import LocalizerDataset
+from model import create_model
+from Train import train_fold, compute_metrics, print_metrics
+
 
 def main():
+    """
+    Main training pipeline with rotating cross-validation.
+
+    This implements a 4-fold rotating CV where:
+    - Group i         -> TEST (Held out completely)
+    - Group (i+1)%4   -> VALIDATION (Used for model tuning)
+    - Remaining 2     -> TRAIN
+    """
+
+    # Setup
+    print("\n" + "=" * 80)
+    print("HEIGHT PREDICTION FROM CT LOCALIZERS - TRAINING PIPELINE")
+    print("=" * 80 + "\n")
+
+    setup_directories()
+    device = get_device()
+    print(f"Using device: {device}\n")
+
+    # ========================================================================
+    # 1. PREPARE DATASET
+    # ========================================================================
+    print("Step 1: Loading and preparing dataset...")
+    print("-" * 80)
+    data_df = prepare_dataset()
+
+    # ========================================================================
+    # 2. CREATE FOLD SPLITS
+    # ========================================================================
+    print("\nStep 2: Creating cross-validation splits...")
+    print("-" * 80)
+    patient_groups, _ = create_fold_splits(data_df, num_folds=NUM_FOLDS)
 
 
+    # ========================================================================
+    # 3. ROTATING CROSS-VALIDATION LOOP
+    # ========================================================================
+    print("\nStep 3: Training with rotating cross-validation...")
+    print("-" * 80)
 
-    config.EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    fold_performance = []
+    all_results = []
+    all_histories = []
 
-    # 1. Load Data
-    train_df, val_df, test_df = load_and_split_data()
+    for fold_idx in range(NUM_FOLDS):
+        # Get train/val/test splits for this fold
+        train_df, val_df, test_df = get_fold_dataframes(
+            data_df, patient_groups, fold_idx
+        )
 
-    train_dataset = NiftiXRVDataset(train_df, training=True)
-    val_dataset = NiftiXRVDataset(val_df, training=False)
-    test_dataset = NiftiXRVDataset(test_df, training=False)
+        # Create datasets
+        train_dataset = LocalizerDataset(train_df, is_train=True)
+        val_dataset = LocalizerDataset(val_df, is_train=False)
+        test_dataset = LocalizerDataset(test_df, is_train=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-                              num_workers=config.NUM_WORKERS, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
-                            num_workers=config.NUM_WORKERS, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
-                             num_workers=config.NUM_WORKERS, pin_memory=True)
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True if device.type == 'cuda' else False
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True if device.type == 'cuda' else False
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True if device.type == 'cuda' else False
+        )
 
+        # Create fresh model for this fold
+        model = create_model(weights_path=str(WEIGHTS_PATH), device=str(device))
 
-    print("Visualizing Training Data (With Augmentations):")
-    visualize_dataset_samples(train_dataset, num_samples=5,title_prefix="Train Set")
+        # Train the fold
+        history = train_fold(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            device=device,
+            fold_idx=fold_idx
+        )
 
+        # Store results
+        fold_performance.append(history['test_mae'])
+        all_histories.append(history)
 
-    # 2. Setup Model
-    model = XRVHeightRegressor(spacing_dim=2).to(config.DEVICE)
+        # Log detailed results for each epoch
+        for epoch_idx, (train_loss, val_loss) in enumerate(
+                zip(history['train_loss'], history['val_loss'])
+        ):
+            all_results.append({
+                'Fold': fold_idx + 1,
+                'Epoch': epoch_idx + 1,
+                'Train_MAE': train_loss,
+                'Val_MAE': val_loss,
+                'Test_MAE': None
+            })
 
-    # 3. Stage 1: Train Head Only
-    print("\n--- Stage 1: Training Head Only ---")
-    head_params = [p for n, p in model.named_parameters() if p.requires_grad and 'backbone' not in n]
-    optimizer = torch.optim.Adam(head_params, lr=1e-3)
+        # Add final test result
+        all_results.append({
+            'Fold': fold_idx + 1,
+            'Epoch': 'TEST_FINAL',
+            'Train_MAE': None,
+            'Val_MAE': history['best_val_mae'],
+            'Test_MAE': history['test_mae']
+        })
 
-    best_val_mae, patience, bad = float('inf'), 8, 0
-    save_path_head = config.EXPERIMENTS_DIR / "best_xrv_head.pt"
+        # Compute and print metrics for this fold
+        metrics = compute_metrics(
+            history['test_predictions'],
+            history['test_labels']
+        )
+        print_metrics(metrics, title=f"Fold {fold_idx + 1} Test Metrics")
 
-    for epoch in range(1, 40):
-        tr_mse, tr_mae = run_epoch(model, train_loader, optimizer)
-        va_mse, va_mae = run_epoch(model, val_loader, optimizer=None)
-        print(f"[E{epoch:02d}] Train MAE {tr_mae:.2f} || Val MAE {va_mae:.2f}")
+    # ========================================================================
+    # 4. SAVE RESULTS AND SUMMARY
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("CROSS-VALIDATION COMPLETE")
+    print("=" * 80)
 
-        if va_mae < best_val_mae - 1e-6:
-            best_val_mae, bad = va_mae, 0
-            torch.save(model.state_dict(), save_path_head)
-        else:
-            bad += 1
-            if bad >= patience:
-                print("Early stopping.")
-                break
+    # Print summary statistics
+    print(f"\nTest MAE across {NUM_FOLDS} folds:")
+    for i, mae in enumerate(fold_performance):
+        print(f"  Fold {i + 1}: {mae:.2f} cm")
 
-    # 4. Stage 2: Fine Tuning
-    print("\n--- Stage 2: Fine Tuning Backbone ---")
-    model.load_state_dict(torch.load(save_path_head, map_location=config.DEVICE))
+    print(f"\nOverall Performance:")
+    print(f"  Mean Test MAE: {np.mean(fold_performance):.2f} ± {np.std(fold_performance):.2f} cm")
+    print(f"  Median Test MAE: {np.median(fold_performance):.2f} cm")
+    print(f"  Min Test MAE: {np.min(fold_performance):.2f} cm")
+    print(f"  Max Test MAE: {np.max(fold_performance):.2f} cm")
 
-    # Unfreeze specific layers
-    for name, p in model.backbone.named_parameters():
-        p.requires_grad = ('denseblock4' in name) or ('norm5' in name)
+    # Save results to Excel
+    print(f"\nSaving results to {RESULTS_EXCEL_PATH}...")
+    save_results_to_excel(all_results, fold_performance, RESULTS_EXCEL_PATH)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
-    best_val_mae_ft, bad = best_val_mae, 0
-    save_path_ft = config.EXPERIMENTS_DIR / "best_xrv_finetuned.pt"
+    print("\n" + "=" * 80)
+    print("TRAINING COMPLETE!")
+    print("=" * 80 + "\n")
 
-    for epoch in range(1, 10):
-        tr_mse, tr_mae = run_epoch(model, train_loader, optimizer)
-        va_mse, va_mae = run_epoch(model, val_loader, optimizer=None)
-        print(f"[FT{epoch:02d}] Train MAE {tr_mae:.2f} || Val MAE {va_mae:.2f}")
-        if va_mae < best_val_mae_ft - 1e-6:
-            best_val_mae_ft, bad = va_mae, 0
-            torch.save(model.state_dict(), save_path_ft)
-        else:
-            bad += 1
-            if bad >= patience:
-                break
+    return fold_performance, all_histories
 
-    # 5. Final Evaluation & Visualization
-    print("\n--- Final Evaluation ---")
-    model.load_state_dict(torch.load(save_path_ft, map_location=config.DEVICE))
-    model.eval()
-
-    test_mse, test_mae = run_epoch(model, test_loader, optimizer=None)
-    print(f"Final Test MAE: {test_mae:.2f} cm")
-
-    # Run Visualization
-    try:
-        visualize_sample(model, test_dataset, test_df)
-    except Exception as e:
-        print(f"Visualization skipped: {e}")
 
 if __name__ == "__main__":
-    main()
+    # Run the main training pipeline
+    fold_performance, histories = main()
+
+    # Optional: Print final summary
+    print("\nFinal Summary:")
+    print(f"  Average Test MAE: {np.mean(fold_performance):.2f} cm")
+    print(f"  Best Fold: Fold {np.argmin(fold_performance) + 1} ({np.min(fold_performance):.2f} cm)")
+    print(f"  Worst Fold: Fold {np.argmax(fold_performance) + 1} ({np.max(fold_performance):.2f} cm)")

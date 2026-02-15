@@ -1,142 +1,214 @@
-import torch
-import torch.nn.functional as F
+
+import pandas as pd
 import numpy as np
-import cv2
-import matplotlib.pyplot as plt
-import config
-import random
+from pathlib import Path
+from typing import Optional, Tuple
 
 
-def run_epoch(model, loader, optimizer=None):
-    is_train = optimizer is not None
-    model.train(is_train)
-    total_mse, total_mae, total_n = 0.0, 0.0, 0
-
-    for img_t, spacing_t, y_t in loader:
-        img_t = img_t.to(config.DEVICE)
-        spacing_t = spacing_t.to(config.DEVICE)
-        y_t = y_t.to(config.DEVICE)
-
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
-
-        pred = model(img_t, spacing_t)
-        loss = F.mse_loss(pred, y_t)
-
-        if is_train:
-            loss.backward()
-            optimizer.step()
-
-        bs = img_t.size(0)
-        total_mse += loss.item() * bs
-        total_mae += (pred - y_t).abs().sum().item()
-        total_n += bs
-
-    return total_mse / total_n, total_mae / total_n
+from config import (
+    EXCEL_PATH, NIFTI_ROOT, REQUIRED_COLUMNS,
+    EXPERIMENTS_DIR, RANDOM_SEED
+)
 
 
-def compute_gradcam(model, input_image, spacing, target_layer):
-    model.eval()
-    activations_list, gradients_list = [], []
-
-    def forward_hook(module, input, output):
-        activations_list.append(output)
-
-    def backward_hook(module, grad_input, grad_output):
-        gradients_list.append(grad_output[0])
-
-    forward_handle = target_layer.register_forward_hook(forward_hook)
-    backward_handle = target_layer.register_backward_hook(backward_hook)
-
-    input_image.requires_grad_(True)
-    output = model(input_image, spacing)
-    model.zero_grad()
-    output.backward(torch.ones_like(output), retain_graph=True)
-
-    activations_np = activations_list[0].cpu().data.numpy()
-    gradients_np = gradients_list[0].cpu().data.numpy()
-
-    forward_handle.remove()
-    backward_handle.remove()
-
-    weights = np.mean(gradients_np, axis=(2, 3))[0]
-    grad_cam = activations_np[0] * weights[:, None, None]
-    grad_cam = np.maximum(grad_cam, 0)
-    grad_cam = np.sum(grad_cam, axis=0)
-    grad_cam = grad_cam - np.min(grad_cam)
-    if np.max(grad_cam) != 0:
-        grad_cam = grad_cam / np.max(grad_cam)
-    grad_cam = cv2.resize(grad_cam, (config.IMG_SIZE, config.IMG_SIZE))
-    return grad_cam
-
-
-def visualize_sample(model, dataset, df):
-    idx_to_visualize = 0
-    sample_img_t, sample_spacing_t, sample_target_t = dataset[idx_to_visualize]
-    sample_img_t = sample_img_t.unsqueeze(0).to(config.DEVICE)
-    sample_spacing_t = sample_spacing_t.unsqueeze(0).to(config.DEVICE)
-
-    model.eval()
-    with torch.no_grad():
-        pred_height = model(sample_img_t, sample_spacing_t).item()
-
-    target_layer = model.backbone.features.norm5
-    heatmap = compute_gradcam(model, sample_img_t, sample_spacing_t, target_layer)
-    original_image_np = (sample_img_t.squeeze().cpu().detach().numpy() + 1024) / 2048
-
-    plt.figure(figsize=(10, 5))
-    plt.subplot(1, 2, 1)
-    plt.imshow(original_image_np, cmap='gray')
-    plt.title(f'True: {sample_target_t.item():.2f}cm, Pred: {pred_height:.2f}cm')
-    plt.axis('off')
-
-    plt.subplot(1, 2, 2)
-    plt.imshow(original_image_np, cmap='gray')
-    plt.imshow(heatmap, cmap='jet', alpha=0.5)
-    plt.title('Grad-CAM')
-    plt.axis('off')
-    plt.show()
-
-    print(f"Viz Patient: {df.iloc[idx_to_visualize]['Patient_ID']}")
-
-
-def visualize_dataset_samples(dataset, num_samples=5, title_prefix="Sample"):
+def load_and_validate_dataframe() -> pd.DataFrame:
     """
-    Picks random samples from the dataset and visualizes them.
-    Handles the un-normalization from XRV range [-1024, 1024] back to [0, 1].
+    Load Excel file and validate required columns.
+
+    Returns:
+        pd.DataFrame: Validated dataframe with required columns
     """
-    plt.figure(figsize=(15, 5))
+    df = pd.read_excel(EXCEL_PATH, engine='openpyxl')
+    df.columns = [str(c).strip() for c in df.columns]
 
-    # Pick random indices
-    indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
+    # Validate required columns
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
 
-    for i, idx in enumerate(indices):
-        # 1. Get the data from the dataset
-        img_tensor, spacing_tensor, height_tensor = dataset[idx]
+    # Sanitize Height (numeric, in cm)
+    df['Height'] = pd.to_numeric(df['Height'], errors='coerce')
+    # Drop rows without height
+    df = df.dropna(subset=['Height'])
 
-        # 2. Convert to Numpy
-        # Shape is [1, 224, 224], squeeze to [224, 224]
-        img_np = img_tensor.squeeze().cpu().numpy()
+    return df
 
-        # 3. Un-normalize for visualization
-        # The dataset maps [0,1] -> [-1024, 1024]. We reverse this.
-        # Formula: x_view = (x_xrv + 1024) / 2048
-        img_view = (img_np + 1024) / 2048
 
-        # Clip just in case floating point math went slightly out of bounds
-        img_view = np.clip(img_view, 0, 1)
+def resolve_nifti_dir(localizer_dir_str: str) -> Optional[Path]:
+    """
+    Resolve NIfTI directory path from various formats.
 
-        # 4. Plot
-        ax = plt.subplot(1, num_samples, i + 1)
-        ax.imshow(img_view, cmap='gray')
+    Args:
+        localizer_dir_str: Path string from Excel file
 
-        # Extract spacing for title
-        sx, sy = spacing_tensor[0].item(), spacing_tensor[1].item()
-        h_cm = height_tensor.item()
+    Returns:
+        Path object if directory exists, None otherwise
+    """
+    if not isinstance(localizer_dir_str, str) or not localizer_dir_str.strip():
+        return None
 
-        ax.set_title(f"H: {h_cm:.1f}cm\nSpace: {sx:.2f}x{sy:.2f}", fontsize=10)
-        ax.axis('off')
+    marker = 'rambam_nifti_localizers'
+    s = localizer_dir_str.strip()
 
-    plt.suptitle(f"{title_prefix} (Bone Window + Resize + Padding)", fontsize=14)
-    plt.tight_layout()
-    plt.show()
+    if marker in s:
+        tail = s.split(marker, maxsplit=1)[-1].strip('\\/ ')
+        rel = Path(tail.replace('\\', '/'))
+        candidate = NIFTI_ROOT / rel
+    else:
+        # Normalize separators; decide whether it's absolute or relative
+        normalized = Path(s.replace('\\', '/'))
+        candidate = normalized if normalized.is_absolute() else (NIFTI_ROOT / normalized)
+
+    # Return only existing directories
+    return candidate if candidate.exists() and candidate.is_dir() else None
+
+
+def pick_nifti_file(nifti_dir: Path) -> Optional[Path]:
+    """
+    Find first NIfTI file in directory.
+
+    Args:
+        nifti_dir: Directory containing NIfTI files
+
+    Returns:
+        Path to first .nii or .nii.gz file found, or None
+    """
+    files = sorted(nifti_dir.glob('*.nii')) + sorted(nifti_dir.glob('*.nii.gz'))
+    return files[0] if files else None
+
+
+def prepare_dataset() -> pd.DataFrame:
+    """
+    Load Excel, resolve NIfTI paths, and prepare final dataset.
+
+    Returns:
+        pd.DataFrame: Dataset with columns ['Patient_ID', 'nifti_path', 'height_cm']
+    """
+    df = load_and_validate_dataframe()
+
+    rows = []
+    skipped_unresolved_dir = 0
+    skipped_no_files = 0
+
+    for _, r in df.iterrows():
+        pid = str(r['Patient_ID']).strip()
+        height_cm = float(r['Height'])
+        d = resolve_nifti_dir(r['Localizer_Path_NIfTI'])
+        if d is None:
+            skipped_unresolved_dir += 1
+            continue
+        f = pick_nifti_file(d)
+        if f is None:
+            skipped_no_files += 1
+            continue
+        rows.append({
+            'Patient_ID': pid,
+            'nifti_path': str(f),
+            'height_cm': height_cm
+        })
+
+    data_df = pd.DataFrame(rows)
+
+    print(f"Resolved NIfTI files for {len(data_df)} rows")
+    print(f"Skipped unresolved dir: {skipped_unresolved_dir}")
+    print(f"Skipped empty NIfTI dir: {skipped_no_files}")
+    print(f"Total Patients: {data_df['Patient_ID'].nunique()}")
+
+    return data_df
+
+
+def create_fold_splits(
+        data_df: pd.DataFrame,
+        num_folds: int = 4
+) -> Tuple[list, list]:
+    """
+    Create patient-level fold splits for rotating cross-validation.
+
+    Args:
+        data_df: DataFrame with patient data
+        num_folds: Number of folds for cross-validation
+
+    Returns:
+        Tuple of (patient_groups, patient_ids)
+    """
+    # Get unique patients and shuffle them
+    patient_ids = data_df['Patient_ID'].unique()
+    np.random.seed(RANDOM_SEED)
+    np.random.shuffle(patient_ids)
+
+    # Split patients into N roughly equal groups
+    patient_groups = np.array_split(patient_ids, num_folds)
+
+    print(f"\nFold Split Summary:")
+    print(f"Total Patients: {len(patient_ids)}")
+    print(f"Patients per fold: {[len(g) for g in patient_groups]}")
+
+    return patient_groups, patient_ids
+
+
+def get_fold_dataframes(
+        data_df: pd.DataFrame,
+        patient_groups: list,
+        fold_idx: int
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Get train/val/test dataframes for a specific fold in rotating CV.
+
+    The rotation scheme:
+    - Group i         -> TEST (Held out completely)
+    - Group (i+1)%4   -> VALIDATION (Used for model tuning)
+    - Remaining 2     -> TRAIN
+
+    Args:
+        data_df: Full dataset
+        patient_groups: List of patient ID arrays for each group
+        fold_idx: Current fold index (0-based)
+
+    Returns:
+        Tuple of (train_df, val_df, test_df)
+    """
+    num_folds = len(patient_groups)
+
+    test_pats = patient_groups[fold_idx]
+    val_pats = patient_groups[(fold_idx + 1) % num_folds]
+
+    # Concatenate the remaining groups for training
+    train_pats = np.concatenate([
+        patient_groups[(fold_idx + 2) % num_folds],
+        patient_groups[(fold_idx + 3) % num_folds]
+    ])
+
+    # Filter DataFrame
+    train_df = data_df[data_df['Patient_ID'].isin(train_pats)].reset_index(drop=True)
+    val_df = data_df[data_df['Patient_ID'].isin(val_pats)].reset_index(drop=True)
+    test_df = data_df[data_df['Patient_ID'].isin(test_pats)].reset_index(drop=True)
+
+    print(f"\nFold {fold_idx + 1} Data Split:")
+    print(f"  Train: {len(train_df)} images ({train_df['Patient_ID'].nunique()} patients)")
+    print(f"  Val:   {len(val_df)} images ({val_df['Patient_ID'].nunique()} patients)")
+    print(f"  Test:  {len(test_df)} images ({test_df['Patient_ID'].nunique()} patients)")
+
+    return train_df, val_df, test_df
+
+
+def save_results_to_excel(all_results: list, fold_performance: list, output_path: str):
+    """
+    Save training results to Excel file.
+
+    Args:
+        all_results: List of dictionaries with detailed training logs
+        fold_performance: List of test MAE scores for each fold
+        output_path: Path to save Excel file
+    """
+    results_df = pd.DataFrame(all_results)
+    summary_df = pd.DataFrame({
+        'Fold': range(1, len(fold_performance) + 1),
+        'Test_MAE': fold_performance
+    })
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        results_df.to_excel(writer, sheet_name='Detailed_Logs', index=False)
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+
+    print(f"\nResults saved to '{output_path}'")
+    print(f"Average TEST MAE: {np.mean(fold_performance):.2f} ± {np.std(fold_performance):.2f} cm")
