@@ -4,154 +4,131 @@ import nibabel as nib
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import os
+import random
 
 # ============================================================================
-# CONFIGURATION - EDIT YOUR FILE PATH HERE
+# CONFIGURATION
 # ============================================================================
-NIFTI_FILE = r"C:\Users\Lab2\Desktop\mohamed sliman\rambam_nifti_localizers\C25\28.10.2018\0000647F\C25_28.10.2018_0000647F.nii.gz"
+NIFTI_FILE = r"C:\Users\Lab2\Desktop\mohamed sliman\rambam_nifti_localizers\C18\07.03.2017\00008408\C18_07.03.2017_00008408.nii.gz"
 
 PATIENT_ID = "C07"
-SAVE_OUTPUT = False  # Set to True to save images
+SAVE_OUTPUT = False
 OUTPUT_DIR = r"C:\Users\Lab2\Desktop\preprocessing_output"
 
-# Preprocessing parameters
+# Pipeline parameters matching the PyTorch dataset config
 IMG_SIZE = 256
-TARGET_CROP_MM = 250  # FIXED PHYSICAL WIDTH (mm) instead of pixels 140
+WIN_MIN = -500
+WIN_MAX = 1300
+THRESHOLD_VALUE = 50
 
 
 # ============================================================================
-# IMPROVED PREPROCESSING FUNCTIONS
+# PREPROCESSING FUNCTIONS (Mirrored from LocalizerDataset)
 # ============================================================================
 
 def load_nifti(path):
-    """Load NIfTI file and extract 2D image"""
+    """Load NIfTI file, handle dimensions, and extract 2D image & spacing."""
     nii = nib.load(path)
     img_data = nii.get_fdata()
     header = nii.header
 
-    # Handle 3D volumes
     if img_data.ndim >= 3:
-        if img_data.shape[-1] == 1:
-            img_data = img_data.squeeze()
-        else:
-            img_data = np.max(img_data, axis=-1)
+        img_data = img_data.squeeze() if img_data.shape[-1] == 1 else np.max(img_data, axis=-1)
 
-    if img_data.ndim != 2:
-        if img_data.ndim > 2:
-            img_data = img_data[..., img_data.shape[-1] // 2]
-        else:
-            img_data = np.squeeze(img_data)
+    if img_data.ndim > 2:
+        img_data = img_data[..., img_data.shape[-1] // 2]
+    elif img_data.ndim < 2:
+        img_data = np.zeros((IMG_SIZE, IMG_SIZE))
 
     spacing = header.get_zooms()[:2]
     return img_data, spacing
 
 
-def standardize_orientation_robust(img):
-    """
-    Robustly detects if body is horizontal, regardless of HU range.
-    """
-    # Normalize temp image to 0-255 just for detection
-    img_u8 = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+def apply_windowing(img):
+    """Clips to Hounsfield Unit window and scales to [0, 1]."""
+    img = np.clip(img, WIN_MIN, WIN_MAX)
+    return (img - WIN_MIN) / (WIN_MAX - WIN_MIN)
 
-    # Threshold at 20% intensity (works for both Raw and 8-bit)
-    _, thresh = cv2.threshold(img_u8, 50, 255, cv2.THRESH_BINARY)
+
+def standardize_orientation(img_2d):
+    """Rotates image if width > height."""
+    img_u8 = cv2.normalize(img_2d, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, thresh = cv2.threshold(img_u8, THRESHOLD_VALUE, 255, cv2.THRESH_BINARY)
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return img, False
+    if not contours:
+        return img_2d, False
 
-    largest = max(contours, key=cv2.contourArea)
-    _, _, w, h = cv2.boundingRect(largest)
+    largest_contour = max(contours, key=cv2.contourArea)
+    _, _, w, h = cv2.boundingRect(largest_contour)
 
     if w > h:
-        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE), True
-    return img, False
+        img_rotated = cv2.rotate(img_2d, cv2.ROTATE_90_CLOCKWISE)
+        return img_rotated, True
+
+    return img_2d, False
 
 
-def crop_to_spine_physical(img, spacing_x, target_width_mm=140):
-    """
-    Crops 140mm of anatomy, ensuring consistent scale.
-    """
-    if spacing_x <= 0: spacing_x = 1.0  # Safety fallback
-
-    crop_w_pixels = int(target_width_mm / spacing_x)
-
-    # Detection
+def trim_empty_vertical_space(img):
+    """Deterministic trim: Removes empty air above head and below feet."""
     img_u8 = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    _, thresh = cv2.threshold(img_u8, 50, 255, cv2.THRESH_BINARY)
-
-    M = cv2.moments(thresh)
-    if M["m00"] == 0:
-        center_x = img.shape[1] // 2
-    else:
-        center_x = int(M["m10"] / M["m00"])
+    _, thresh = cv2.threshold(img_u8, THRESHOLD_VALUE, 255, cv2.THRESH_BINARY)
 
     row_sums = np.sum(thresh, axis=1)
     non_zero_rows = np.where(row_sums > 0)[0]
+
     if len(non_zero_rows) > 0:
-        y_top, y_bottom = non_zero_rows[0], non_zero_rows[-1]
-    else:
-        y_top, y_bottom = 0, img.shape[0]
+        y_top = non_zero_rows[0]
+        y_bottom = non_zero_rows[-1]
+        return img[y_top:y_bottom, :]
+    return img
 
+
+def random_vertical_crop(img, demo_mode=True):
+    """
+    Randomly crops height to simulate partial scans.
+    demo_mode forces a visible 75% crop for the viewer.
+    """
     h, w = img.shape
-    x_start = max(0, center_x - crop_w_pixels // 2)
-    x_end = min(w, center_x + crop_w_pixels // 2)
 
-    return img[y_top:y_bottom, x_start:x_end]
+    if demo_mode:
+        crop_ratio = 0.75
+        new_h = int(h * crop_ratio)
+        y_start = (h - new_h) // 2  # Center it for the demo
+    else:
+        crop_ratio = random.uniform(0.6, 1.0)
+        new_h = int(h * crop_ratio)
+        max_y_start = h - new_h
+        y_start = random.randint(0, max_y_start)
+
+    y_end = y_start + new_h
+    return img[y_start:y_end, :]
 
 
 def get_background_value(img):
-    """
-    Detects if the background is Air (-1024) or Black (0).
-    """
+    """Detects if background is Air or Black."""
     min_val = np.min(img)
-    # If image has negative values like -1000, it's Air. Otherwise, it's 0.
-    if min_val < -900:
-        return -1024
-    else:
-        return min_val
+    return -1024 if min_val < -900 else min_val
 
 
-def resize_and_pad_dynamic(img, target_size):
-    """
-    Resizes and pads using the IMAGE-SPECIFIC background value.
-    """
+def resize_pad_dynamic_with_spacing(img, spacing, target_size):
+    """Resizes, pads dynamically, and calculates updated spacing mapping."""
     pad_value = get_background_value(img)
-
     h, w = img.shape
     scale = target_size / max(h, w)
     new_h, new_w = int(h * scale), int(w * scale)
 
     resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-    # Fill canvas with the detected background (Air or Black)
     final = np.full((target_size, target_size), pad_value, dtype=np.float32)
-
     y_offset = (target_size - new_h) // 2
     x_offset = (target_size - new_w) // 2
     final[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
 
-    return final
+    new_spacing_x = spacing[0] / scale
+    new_spacing_y = spacing[1] / scale
 
-
-def apply_adaptive_normalization(img):
-    """
-    Automatically handles Raw CT (12-bit) vs Processed (8-bit).
-    """
-    min_val = np.min(img)
-    max_val = np.max(img)
-
-    # CASE A: 8-bit Image (Max ~255) -> Just Scale
-    if max_val <= 300 and min_val >= 0:
-        if max_val == 0: return img
-        return img / 255.0
-
-    # CASE B: Raw CT (Max > 1000) -> Apply Bone Window
-    else:
-        WIN_MIN = -500
-        WIN_MAX = 1300
-        windowed = np.clip(img, WIN_MIN, WIN_MAX)
-        normalized = (windowed - WIN_MIN) / (WIN_MAX - WIN_MIN)
-        return normalized
+    return final, (new_spacing_x, new_spacing_y)
 
 
 # ============================================================================
@@ -159,149 +136,93 @@ def apply_adaptive_normalization(img):
 # ============================================================================
 
 print("=" * 70)
-print("CT LOCALIZER PREPROCESSING VIEWER (UNIVERSAL FIX)")
+print("CT LOCALIZER PREPROCESSING VIEWER (DATASET MIRROR)")
 print("=" * 70)
-print(f"\nPatient: {PATIENT_ID}")
-print(f"File: {NIFTI_FILE}")
-print("\nProcessing...")
 
-# Step 1: Load
-print("  1. Loading NIfTI file...")
+# 1. Load NIfTI
 raw_img, spacing = load_nifti(NIFTI_FILE)
-spacing_x = spacing[0]
 
-# Step 2: Orientation (Robust)
-print("  2. Checking orientation (Robust)...")
-oriented, was_rotated = standardize_orientation_robust(raw_img)
+# 2. Windowing
+windowed_img = apply_windowing(raw_img)
 
-# Step 3: Physical Crop
-print(f"  3. Cropping to {TARGET_CROP_MM}mm spine ({spacing_x:.2f} mm/px)...")
-cropped = crop_to_spine_physical(oriented, spacing_x, target_width_mm=TARGET_CROP_MM)
+# 3. Orientation
+oriented_img, was_rotated = standardize_orientation(windowed_img)
+if was_rotated:
+    spacing = (spacing[1], spacing[0])
 
-# Step 4: Resize & Pad (Dynamic)
-print("  4. Resizing and padding (Dynamic Background)...")
-resized = resize_and_pad_dynamic(cropped, IMG_SIZE)
+# 4. Trim Empty Space
+trimmed_img = trim_empty_vertical_space(oriented_img)
 
-# Step 5: Adaptive Normalization
-print("  5. Applying Adaptive Normalization...")
-final = apply_adaptive_normalization(resized)
+# 5. Vertical Crop (Simulated Augmentation)
+cropped_img = random_vertical_crop(trimmed_img, demo_mode=True)
 
-print("\nProcessing complete!")
-print("=" * 70)
+# 6. Resize & Pad (Capturing updated spacing)
+final_img, new_spacing = resize_pad_dynamic_with_spacing(cropped_img, spacing, IMG_SIZE)
 
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
 
-print("\nGenerating visualizations...\n")
-
-# Figure 1: All Steps
+# Figure 1: All Steps (Grid updated to handle 6 specific steps)
 fig = plt.figure(figsize=(18, 10))
-gs = GridSpec(2, 4, figure=fig, hspace=0.25, wspace=0.25)
+gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.3)
 
-# Plot each step
 steps = [
     (raw_img, '1. Raw NIfTI', f'Shape: {raw_img.shape}\nRange: [{raw_img.min():.0f}, {raw_img.max():.0f}] HU', None),
-    (oriented, '2. Orientation', f'Rotated: {"YES" if was_rotated else "NO"}\nShape: {oriented.shape}', None),
-    (cropped, '3. Physical Crop', f'Shape: {cropped.shape}\nTarget: {TARGET_CROP_MM}mm', None),
-    (resized, '4. Resized & Padded', f'Shape: {resized.shape}\nDynamic Pad Val', None),
-    (final, '5. Final Output', f'Shape: {final.shape}\nReady for ResNet50', (0, 1)),
+    (windowed_img, '2. Windowing [0,1]', f'Range: [{windowed_img.min():.1f}, {windowed_img.max():.1f}]', (0, 1)),
+    (oriented_img, '3. Orientation', f'Rotated: {"YES" if was_rotated else "NO"}\nShape: {oriented_img.shape}', (0, 1)),
+    (trimmed_img, '4. Trim Air', f'Shape: {trimmed_img.shape}', (0, 1)),
+    (cropped_img, '5. Vertical Crop (Aug)', f'Shape: {cropped_img.shape}\nDemo: 75% Ratio', (0, 1)),
+    (final_img, '6. Resize & Pad', f'Shape: {final_img.shape}\nFinal', (0, 1)),
 ]
 
 for idx, (img, title, info, vrange) in enumerate(steps):
-    ax = fig.add_subplot(gs[idx // 4, idx % 4])
+    # Lay out the 6 plots in the first 3 columns of the 2x4 grid
+    row = idx // 3
+    col = idx % 3
+    ax = fig.add_subplot(gs[row, col])
 
     if vrange:
         ax.imshow(img, cmap='gray', vmin=vrange[0], vmax=vrange[1])
     else:
-        # Auto-scale display for raw steps
         ax.imshow(img, cmap='gray')
 
     ax.set_title(title, fontsize=11, fontweight='bold')
     ax.axis('off')
-
     ax.text(0.02, 0.98, info, transform=ax.transAxes,
             fontsize=8, verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-# Add summary
-ax_summary = fig.add_subplot(gs[1, 1:3])
+# Add summary in the remaining column of the grid
+ax_summary = fig.add_subplot(gs[:, 3])
 ax_summary.axis('off')
 summary_text = f"""
-PREPROCESSING SUMMARY - Patient {PATIENT_ID}
+PIPELINE SUMMARY
+Patient ID: {PATIENT_ID}
 
-Original Image:
-  • Shape: {raw_img.shape}
-  • HU Range: [{raw_img.min():.1f}, {raw_img.max():.1f}]
-  • Pixel Spacing: ({spacing[0]:.2f}, {spacing[1]:.2f})
+1. Original Data:
+ • Size: {raw_img.shape}
+ • Pixel Spacing: ({spacing[0]:.2f}, {spacing[1]:.2f})
 
-Transformations Applied:
-  ✓ Orientation: {"Rotated 90°" if was_rotated else "No rotation needed"}
-  ✓ Physical Crop: {TARGET_CROP_MM} mm (Consistent scale)
-  ✓ Padding: Dynamic (Auto-detected background)
-  ✓ Normalization: Adaptive (Handles Raw vs 8-bit)
-  ✓ Resize: {IMG_SIZE}×{IMG_SIZE}
+2. Geometric Ops:
+ • Rotation: {"90° CW" if was_rotated else "None"}
+ • Trimmed Dead Space
+ • Simulated Crop: 75% height
 
-Final Output:
-  • Shape: (3, {IMG_SIZE}, {IMG_SIZE})
-  • Value Range: [{final.min():.4f}, {final.max():.4f}]
-  • Ready for: ResNet50 backbone
+3. Final Tensor Prep:
+ • Shape: ({IMG_SIZE}, {IMG_SIZE})
+ • Values: [{final_img.min():.2f}, {final_img.max():.2f}]
+ • New Spacing: ({new_spacing[0]:.4f}, {new_spacing[1]:.4f})
 """
-ax_summary.text(0.1, 0.9, summary_text, transform=ax_summary.transAxes,
-                fontsize=9, verticalalignment='top', family='monospace',
+ax_summary.text(0.0, 0.8, summary_text, transform=ax_summary.transAxes,
+                fontsize=10, verticalalignment='top', family='monospace',
                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
 
-fig.suptitle(f'Universal Preprocessing Pipeline - Patient {PATIENT_ID}',
-             fontsize=14, fontweight='bold')
+fig.suptitle(f'Dataset Preprocessing Pipeline - Patient {PATIENT_ID}', fontsize=14, fontweight='bold')
 
 if SAVE_OUTPUT:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     save_path = os.path.join(OUTPUT_DIR, f'{PATIENT_ID}_all_steps.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {save_path}")
-
-# Figure 2: Before/After Comparison
-fig2, axes = plt.subplots(1, 2, figsize=(14, 7))
-
-axes[0].imshow(raw_img, cmap='gray')
-axes[0].set_title('Before: Raw NIfTI Image', fontsize=12, fontweight='bold')
-axes[0].axis('off')
-axes[0].text(0.02, 0.98,
-             f'Shape: {raw_img.shape}\nHU: [{raw_img.min():.0f}, {raw_img.max():.0f}]',
-             transform=axes[0].transAxes, fontsize=10, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-axes[1].imshow(final, cmap='gray', vmin=0, vmax=1)
-axes[1].set_title('After: Preprocessed Image', fontsize=12, fontweight='bold')
-axes[1].axis('off')
-axes[1].text(0.02, 0.98,
-             f'Shape: {final.shape}\nValues: [0, 1]\nRotated: {"Yes" if was_rotated else "No"}',
-             transform=axes[1].transAxes, fontsize=10, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-fig2.suptitle(f'Before/After Comparison - Patient {PATIENT_ID}',
-              fontsize=14, fontweight='bold')
-plt.tight_layout()
-
-if SAVE_OUTPUT:
-    save_path = os.path.join(OUTPUT_DIR, f'{PATIENT_ID}_comparison.png')
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {save_path}")
-
-print("\n" + "=" * 70)
-print("VISUALIZATION COMPLETE!")
-print("=" * 70)
-print(f"\nPatient: {PATIENT_ID}")
-print(f"Raw image: {raw_img.shape}, HU range: [{raw_img.min():.1f}, {raw_img.max():.1f}]")
-print(f"Final image: {final.shape}, normalized: [{final.min():.4f}, {final.max():.4f}]")
-print(f"Rotated: {'YES (90° clockwise)' if was_rotated else 'NO (already vertical)'}")
-print(f"Pixel spacing: ({spacing[0]:.2f}, {spacing[1]:.2f})")
-
-if SAVE_OUTPUT:
-    print(f"\n✓ Images saved to: {OUTPUT_DIR}")
-else:
-    print("\nTip: Set SAVE_OUTPUT = True to save images to disk")
-
-print("=" * 70)
 
 plt.show()

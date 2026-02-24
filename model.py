@@ -42,15 +42,29 @@ class RadImageNetHubHeightPredictor(nn.Module):
         if freeze_backbone:
             self._freeze_backbone()
 
-        # 5. Metadata branch for pixel spacing (2D -> 8D)
+        # # 5. Metadata branch for pixel spacing (2D -> 8D)
+        # self.meta_fc = nn.Sequential(
+        #     nn.Linear(METADATA_DIM, METADATA_HIDDEN_DIM),
+        #     nn.ReLU()
+        # )
+
         self.meta_fc = nn.Sequential(
-            nn.Linear(METADATA_DIM, METADATA_HIDDEN_DIM),
+            nn.Linear(2, 64),
+            nn.ReLU(),
+            nn.Linear(64, 256),  # Boost metadata to 256 dimensions
             nn.ReLU()
         )
 
         # 6. Regression head (ResNet features + metadata -> height prediction)
+        # self.regressor = nn.Sequential(
+        #     nn.Linear(RESNET_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
+        #     nn.ReLU(),
+        #     nn.Dropout(DROPOUT_RATE),
+        #     nn.Linear(REGRESSOR_HIDDEN_DIM, 1)
+        # )
         self.regressor = nn.Sequential(
-            nn.Linear(RESNET_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
+            # Now combining 2048 + 256 = 2304
+            nn.Linear(2048 + 256, REGRESSOR_HIDDEN_DIM),
             nn.ReLU(),
             nn.Dropout(DROPOUT_RATE),
             nn.Linear(REGRESSOR_HIDDEN_DIM, 1)
