@@ -42,28 +42,14 @@ class RadImageNetHubHeightPredictor(nn.Module):
         if freeze_backbone:
             self._freeze_backbone()
 
-        # # 5. Metadata branch for pixel spacing (2D -> 8D)
-        # self.meta_fc = nn.Sequential(
-        #     nn.Linear(METADATA_DIM, METADATA_HIDDEN_DIM),
-        #     nn.ReLU()
-        # )
-
         self.meta_fc = nn.Sequential(
             nn.Linear(2, 64),
             nn.ReLU(),
             nn.Linear(64, 256),  # Boost metadata to 256 dimensions
-            nn.ReLU()
-        )
+            nn.ReLU())
 
-        # 6. Regression head (ResNet features + metadata -> height prediction)
-        # self.regressor = nn.Sequential(
-        #     nn.Linear(RESNET_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
-        #     nn.ReLU(),
-        #     nn.Dropout(DROPOUT_RATE),
-        #     nn.Linear(REGRESSOR_HIDDEN_DIM, 1)
-        # )
+
         self.regressor = nn.Sequential(
-            # Now combining 2048 + 256 = 2304
             nn.Linear(2048 + 256, REGRESSOR_HIDDEN_DIM),
             nn.ReLU(),
             nn.Dropout(DROPOUT_RATE),
@@ -133,7 +119,7 @@ class RadImageNetHubHeightPredictor(nn.Module):
         img_feats = self.backbone(images)  # (batch, 2048)
 
         # Process metadata
-        meta_feats = self.meta_fc(spacings)  # (batch, 8)
+        meta_feats = self.meta_fc(spacings)
 
         # Combine features
         combined = torch.cat((img_feats, meta_feats), dim=1)  # (batch, 2056)

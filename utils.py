@@ -1,8 +1,10 @@
 
 import pandas as pd
 import numpy as np
-from pathlib import Path
 from typing import Optional, Tuple
+import json
+from pathlib import Path
+
 
 
 from config import (
@@ -212,3 +214,44 @@ def save_results_to_excel(all_results: list, fold_performance: list, output_path
 
     print(f"\nResults saved to '{output_path}'")
     print(f"Average TEST MAE: {np.mean(fold_performance):.2f} ± {np.std(fold_performance):.2f} cm")
+
+
+def save_fold_predictions(
+        test_df: pd.DataFrame,
+        predictions: np.ndarray,
+        fold_idx: int,
+        output_dir: str = "experiments_height_pytorch"
+):
+    """
+    Saves the individual patient predictions and errors for the test set of a fold.
+    """
+    # Create a copy to avoid modifying the original dataframe
+    results_df = test_df.copy()
+
+    # Attach predictions
+    results_df['Predicted_Height'] = predictions.flatten()
+
+    # Calculate Absolute Error (assuming the true label column is 'Height' or 'height_cm')
+    true_label_col = 'Height' if 'Height' in results_df.columns else 'height_cm'
+    results_df['Absolute_Error'] = np.abs(results_df['Predicted_Height'] - results_df[true_label_col])
+
+    # Sort by Absolute Error (Descending) to easily see the worst predictions at the top
+    results_df = results_df.sort_values(by='Absolute_Error', ascending=False)
+
+    # Select and reorder the most important columns to look at
+    # (Keeping the file path in case you want to manually inspect bad predictions)
+    display_cols = ['Patient_ID', true_label_col, 'Predicted_Height', 'Absolute_Error']
+    if 'Localizer_Path_NIfTI' in results_df.columns:
+        display_cols.append('Localizer_Path_NIfTI')
+    elif 'nifti_path' in results_df.columns:
+        display_cols.append('nifti_path')
+
+    results_df = results_df[display_cols]
+
+    # Save to CSV
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"fold_{fold_idx + 1}_patient_predictions.csv"
+
+    results_df.to_csv(out_file, index=False)
+    print(f"  -> Saved patient-level predictions to {out_file.name}")

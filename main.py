@@ -5,11 +5,11 @@ import numpy as np
 
 from config import (
     NUM_FOLDS, BATCH_SIZE, WEIGHTS_PATH, RESULTS_EXCEL_PATH,
-    setup_directories, get_device
+    setup_directories, get_device,EXPERIMENTS_DIR
 )
 from utils import (
     prepare_dataset, create_fold_splits, get_fold_dataframes,
-    save_results_to_excel
+    save_results_to_excel,save_fold_predictions
 )
 from dataset import LocalizerDataset
 from model import create_model
@@ -66,6 +66,7 @@ def main():
             data_df, patient_groups, fold_idx
         )
 
+
         # Create datasets
         train_dataset = LocalizerDataset(train_df, is_train=True)
         val_dataset = LocalizerDataset(val_df, is_train=False)
@@ -106,7 +107,7 @@ def main():
             device=device,
             fold_idx=fold_idx
         )
-
+        save_fold_predictions(test_df, history['test_predictions'], fold_idx, str(EXPERIMENTS_DIR))
         # Store results
         fold_performance.append(history['test_mae'])
         all_histories.append(history)

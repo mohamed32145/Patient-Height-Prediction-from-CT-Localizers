@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 from typing import Dict, Tuple
 import numpy as np
 
+
+
 from config import (
     BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, WEIGHT_DECAY,
     LOG_FREQUENCY, MODEL_CHECKPOINT_PATTERN
@@ -112,15 +114,8 @@ def evaluate(
     return avg_loss, predictions, ground_truth
 
 
-def train_fold(
-        model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        test_loader: DataLoader,
-        device: torch.device,
-        fold_idx: int,
-        num_epochs: int = NUM_EPOCHS
-) -> Dict:
+def train_fold(model: nn.Module,train_loader: DataLoader,val_loader: DataLoader,test_loader: DataLoader,
+               device: torch.device,fold_idx: int,num_epochs: int = NUM_EPOCHS) -> Dict:
     """
     Train model for one fold of cross-validation.
 
@@ -143,6 +138,9 @@ def train_fold(
         weight_decay=WEIGHT_DECAY
     )
     criterion = nn.L1Loss()  # MAE Loss
+
+
+
 
     # Track best model
     best_val_mae = float('inf')
