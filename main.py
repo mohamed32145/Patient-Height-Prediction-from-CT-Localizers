@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from config import (
-    NUM_FOLDS, BATCH_SIZE, WEIGHTS_PATH, RESULTS_EXCEL_PATH,
+    NUM_FOLDS, BATCH_SIZE, RESULTS_EXCEL_PATH,
     setup_directories, get_device,EXPERIMENTS_DIR
 )
 from utils import (
@@ -96,7 +96,7 @@ def main():
         )
 
         # Create fresh model for this fold
-        model = create_model(weights_path=str(WEIGHTS_PATH), device=str(device))
+        model = create_model(device=str(device))
 
         # Train the fold
         history = train_fold(
@@ -119,8 +119,9 @@ def main():
             all_results.append({
                 'Fold': fold_idx + 1,
                 'Epoch': epoch_idx + 1,
-                'Train_MAE': train_loss,
-                'Val_MAE': val_loss,
+                'Train_MSE': train_loss,
+                'Val_MSE': val_loss,
+                'Val_MAE': history['val_mae'][epoch_idx],
                 'Test_MAE': None
             })
 
@@ -128,8 +129,9 @@ def main():
         all_results.append({
             'Fold': fold_idx + 1,
             'Epoch': 'TEST_FINAL',
-            'Train_MAE': None,
-            'Val_MAE': history['best_val_mae'],
+            'Train_MSE': None,
+            'Val_MSE': history['best_val_loss'],
+            'Val_MAE': None,
             'Test_MAE': history['test_mae']
         })
 

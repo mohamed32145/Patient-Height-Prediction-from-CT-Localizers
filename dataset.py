@@ -10,15 +10,15 @@ import json
 import os
 
 from config import (
-    IMG_SIZE, WIN_MIN, WIN_MAX, THRESHOLD_VALUE,
+    IMG_SIZE, TARGET_PIXEL_SPACING_MM, WIN_MIN, WIN_MAX, THRESHOLD_VALUE,
     AUG_HORIZONTAL_FLIP_PROB, AUG_SHIFT_LIMIT, AUG_SCALE_LIMIT,
     AUG_ROTATE_LIMIT, AUG_SHIFT_SCALE_ROTATE_PROB,
     AUG_BRIGHTNESS_CONTRAST_PROB
 )
 
-# --- GLOBAL STATS
-GLOBAL_MEAN = 0.185
-GLOBAL_STD = 0.265
+# EfficientNet ImageNet normalization
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 class LocalizerDataset(Dataset):
@@ -33,11 +33,9 @@ class LocalizerDataset(Dataset):
             - Physically Accurate Cropping and Resizing (Preserves accurate mm/px for model)
             """
 
-            def __init__(self, df, is_train=False, mean=GLOBAL_MEAN, std=GLOBAL_STD):
+            def __init__(self, df, is_train=False):
                 self.df = df
                 self.is_train = is_train
-                self.mean = mean
-                self.std = std
 
                 # Define augmentation pipeline
                 if self.is_train:
@@ -64,8 +62,8 @@ class LocalizerDataset(Dataset):
 
                         # --- Normalization (Dataset Level) ---
                         A.Normalize(
-                            mean=[self.mean],
-                            std=[self.std],
+                            mean=IMAGENET_MEAN,
+                            std=IMAGENET_STD,
                             max_pixel_value=1.0
                         ),
 
@@ -74,8 +72,8 @@ class LocalizerDataset(Dataset):
                 else:
                     self.transform = A.Compose([
                         A.Normalize(
-                            mean=[self.mean],
-                            std=[self.std],
+                            mean=IMAGENET_MEAN,
+                            std=IMAGENET_STD,
                             max_pixel_value=1.0
                         ),
                         ToTensorV2()
@@ -169,6 +167,18 @@ class LocalizerDataset(Dataset):
 
                 return img[y_start:y_end, :]
 
+            def resample_to_target_spacing(self, img, spacing, target_spacing_mm=TARGET_PIXEL_SPACING_MM):
+
+                """Resample image to isotropic target pixel spacing before network resizing."""
+                sx, sy = float(spacing[0]), float(spacing[1])
+                h, w = img.shape
+
+                new_w = max(1, int(round(w * (sx / target_spacing_mm))))
+                new_h = max(1, int(round(h * (sy / target_spacing_mm))))
+
+                resampled = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                return resampled, (target_spacing_mm, target_spacing_mm)
+
             def resize_pad_dynamic_with_spacing(self, img, spacing, target_size):
 
                 """
@@ -253,18 +263,19 @@ class LocalizerDataset(Dataset):
                     # 5. Random Vertical Crop (Augmentation)
                     img_data = self.random_vertical_crop(img_data)
 
-                    # 7. Resize & Pad (Capturing the updated spacing!)
-                    img_data, updated_spacing = self.resize_pad_dynamic_with_spacing(img_data, spacing, IMG_SIZE)
+                                        # 7. Resample to 1 mm spacing, then resize/pad for model input
+                    img_data, spacing_iso = self.resample_to_target_spacing(img_data, spacing)
+                    img_data, updated_spacing = self.resize_pad_dynamic_with_spacing(img_data, spacing_iso, IMG_SIZE)
 
                     # 8. Create spacing tensor using the accurately calculated numbers
                     spacing_tensor = torch.tensor(updated_spacing, dtype=torch.float32)
 
 
                     # 9. Augmentations (includes Global Normalization)
-                    img_data = img_data.astype(np.float32)[:, :, np.newaxis]
+                    img_data = img_data.astype(np.float32)
+                    img_data = np.repeat(img_data[:, :, np.newaxis], 3, axis=2)
                     augmented = self.transform(image=img_data)
                     img_tensor = augmented['image']
-                    img_tensor = img_tensor.repeat(3, 1, 1)
 
                     return img_tensor, spacing_tensor, torch.tensor(height_label, dtype=torch.float32)
 
