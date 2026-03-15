@@ -23,7 +23,8 @@ WEIGHTS_PATH = "C:/Users/Lab2/Desktop/mohamed sliman/RadImageNet_pytorch/ResNet5
 REQUIRED_COLUMNS = ['Patient_ID', 'Height', 'Localizer_Path_NIfTI']
 
 # Image processing parameters
-IMG_SIZE = 256
+IMG_SIZE = 384
+TARGET_PIXEL_SPACING_MM = 1.0
 
 WIN_MIN = 400 - (1800 // 2)  # -500 for bone windowing
 WIN_MAX = 400 + (1800 // 2)  # 1300 for bone windowing
@@ -38,8 +39,10 @@ THRESHOLD_VALUE = 50
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================
-# ResNet50 feature dimension
-RESNET_FEATURE_DIM = 2048
+# EfficientNetV2 feature dimension (for efficientnet_v2_s)
+BACKBONE_NAME = 'efficientnet_v2_s'
+BACKBONE_FEATURE_DIM = 1280
+USE_IMAGENET_PRETRAINED = True
 
 # Metadata (pixel spacing) dimension
 METADATA_DIM = 2
@@ -63,12 +66,26 @@ BATCH_SIZE = 16
 NUM_EPOCHS = 50
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-5
+LOSS_NAME = 'mse'
+
+# LR scheduling
+USE_COSINE_ANNEALING = True
+COSINE_T_MAX = NUM_EPOCHS
+COSINE_ETA_MIN = 1e-6
 
 # Device configuration
 DEVICE = 'cuda'
 
 # Logging frequency (print every N epochs)
 LOG_FREQUENCY = 5
+
+# Forced fold assignment (strict patient-level CV anchors)
+FORCED_TEST_PATIENTS_BY_FOLD = {
+    0: 'C19',
+    1: 'C22',
+    2: 'C24',
+    3: 'C38'
+}
 
 # ============================================================================
 # AUGMENTATION CONFIGURATION

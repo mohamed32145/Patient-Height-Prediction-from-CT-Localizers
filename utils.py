@@ -1,51 +1,28 @@
-
 import pandas as pd
 import numpy as np
 from typing import Optional, Tuple
-import json
 from pathlib import Path
-
-
 
 from config import (
     EXCEL_PATH, NIFTI_ROOT, REQUIRED_COLUMNS,
-    EXPERIMENTS_DIR, RANDOM_SEED
+    EXPERIMENTS_DIR, FORCED_TEST_PATIENTS_BY_FOLD, RANDOM_SEED
 )
 
 
 def load_and_validate_dataframe() -> pd.DataFrame:
-    """
-    Load Excel file and validate required columns.
-
-    Returns:
-        pd.DataFrame: Validated dataframe with required columns
-    """
     df = pd.read_excel(EXCEL_PATH, engine='openpyxl')
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Validate required columns
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    # Sanitize Height (numeric, in cm)
     df['Height'] = pd.to_numeric(df['Height'], errors='coerce')
-    # Drop rows without height
     df = df.dropna(subset=['Height'])
-
     return df
 
 
 def resolve_nifti_dir(localizer_dir_str: str) -> Optional[Path]:
-    """
-    Resolve NIfTI directory path from various formats.
-
-    Args:
-        localizer_dir_str: Path string from Excel file
-
-    Returns:
-        Path object if directory exists, None otherwise
-    """
     if not isinstance(localizer_dir_str, str) or not localizer_dir_str.strip():
         return None
 
@@ -57,35 +34,18 @@ def resolve_nifti_dir(localizer_dir_str: str) -> Optional[Path]:
         rel = Path(tail.replace('\\', '/'))
         candidate = NIFTI_ROOT / rel
     else:
-        # Normalize separators; decide whether it's absolute or relative
         normalized = Path(s.replace('\\', '/'))
         candidate = normalized if normalized.is_absolute() else (NIFTI_ROOT / normalized)
 
-    # Return only existing directories
     return candidate if candidate.exists() and candidate.is_dir() else None
 
 
 def pick_nifti_file(nifti_dir: Path) -> Optional[Path]:
-    """
-    Find first NIfTI file in directory.
-
-    Args:
-        nifti_dir: Directory containing NIfTI files
-
-    Returns:
-        Path to first .nii or .nii.gz file found, or None
-    """
     files = sorted(nifti_dir.glob('*.nii')) + sorted(nifti_dir.glob('*.nii.gz'))
     return files[0] if files else None
 
 
 def prepare_dataset() -> pd.DataFrame:
-    """
-    Load Excel, resolve NIfTI paths, and prepare final dataset.
-
-    Returns:
-        pd.DataFrame: Dataset with columns ['Patient_ID', 'nifti_path', 'height_cm']
-    """
     df = load_and_validate_dataframe()
 
     rows = []
@@ -119,68 +79,71 @@ def prepare_dataset() -> pd.DataFrame:
     return data_df
 
 
-def create_fold_splits(
-        data_df: pd.DataFrame,
-        num_folds: int = 4
-) -> Tuple[list, list]:
+def create_fold_splits(data_df: pd.DataFrame, num_folds: int = 4) -> Tuple[list, list]:
     """
-    Create patient-level fold splits for rotating cross-validation.
-
-    Args:
-        data_df: DataFrame with patient data
-        num_folds: Number of folds for cross-validation
-
-    Returns:
-        Tuple of (patient_groups, patient_ids)
+    Strict patient-level split with forced anchors and approximate stratification by height.
     """
-    # Get unique patients and shuffle them
-    patient_ids = data_df['Patient_ID'].unique()
-    np.random.seed(RANDOM_SEED)
-    np.random.shuffle(patient_ids)
+    if num_folds != 4:
+        raise ValueError("This project currently expects NUM_FOLDS=4.")
 
-    # Split patients into N roughly equal groups
-    patient_groups = np.array_split(patient_ids, num_folds)
+    patient_df = data_df.groupby('Patient_ID', as_index=False)['height_cm'].mean()
+    patient_ids = patient_df['Patient_ID'].to_numpy()
 
-    print(f"\nFold Split Summary:")
+    # Initialize folds with required anchor patients
+    patient_groups = [[] for _ in range(num_folds)]
+    assigned = set()
+
+    for fold_idx, patient_id in FORCED_TEST_PATIENTS_BY_FOLD.items():
+        if patient_id in set(patient_ids):
+            patient_groups[fold_idx].append(patient_id)
+            assigned.add(patient_id)
+        else:
+            print(f"Warning: forced patient {patient_id} not found in dataset.")
+
+    # Stratify remaining patients using height quantiles then greedy balance
+    remaining = patient_df[~patient_df['Patient_ID'].isin(assigned)].copy()
+    if not remaining.empty:
+        n_bins = min(4, remaining['height_cm'].nunique())
+        if n_bins > 1:
+            remaining['height_bin'] = pd.qcut(
+                remaining['height_cm'],
+                q=n_bins,
+                labels=False,
+                duplicates='drop'
+            )
+        else:
+            remaining['height_bin'] = 0
+
+        rng = np.random.default_rng(RANDOM_SEED)
+        for _, group in remaining.groupby('height_bin'):
+            ids = group['Patient_ID'].tolist()
+            rng.shuffle(ids)
+            for pid in ids:
+                target_fold = int(np.argmin([len(g) for g in patient_groups]))
+                patient_groups[target_fold].append(pid)
+
+    patient_groups = [np.array(g, dtype=object) for g in patient_groups]
+
+    print("\nFold Split Summary:")
     print(f"Total Patients: {len(patient_ids)}")
     print(f"Patients per fold: {[len(g) for g in patient_groups]}")
+    for fold_idx, group in enumerate(patient_groups):
+        print(f"  Fold {fold_idx + 1} forced anchor: {FORCED_TEST_PATIENTS_BY_FOLD.get(fold_idx)}")
+        print(f"    Patients: {sorted(group.tolist())}")
 
     return patient_groups, patient_ids
 
 
-def get_fold_dataframes(
-        data_df: pd.DataFrame,
-        patient_groups: list,
-        fold_idx: int
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Get train/val/test dataframes for a specific fold in rotating CV.
-
-    The rotation scheme:
-    - Group i         -> TEST (Held out completely)
-    - Group (i+1)%4   -> VALIDATION (Used for model tuning)
-    - Remaining 2     -> TRAIN
-
-    Args:
-        data_df: Full dataset
-        patient_groups: List of patient ID arrays for each group
-        fold_idx: Current fold index (0-based)
-
-    Returns:
-        Tuple of (train_df, val_df, test_df)
-    """
+def get_fold_dataframes(data_df: pd.DataFrame, patient_groups: list, fold_idx: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     num_folds = len(patient_groups)
 
     test_pats = patient_groups[fold_idx]
     val_pats = patient_groups[(fold_idx + 1) % num_folds]
-
-    # Concatenate the remaining groups for training
     train_pats = np.concatenate([
         patient_groups[(fold_idx + 2) % num_folds],
         patient_groups[(fold_idx + 3) % num_folds]
     ])
 
-    # Filter DataFrame
     train_df = data_df[data_df['Patient_ID'].isin(train_pats)].reset_index(drop=True)
     val_df = data_df[data_df['Patient_ID'].isin(val_pats)].reset_index(drop=True)
     test_df = data_df[data_df['Patient_ID'].isin(test_pats)].reset_index(drop=True)
@@ -190,18 +153,20 @@ def get_fold_dataframes(
     print(f"  Val:   {len(val_df)} images ({val_df['Patient_ID'].nunique()} patients)")
     print(f"  Test:  {len(test_df)} images ({test_df['Patient_ID'].nunique()} patients)")
 
+    overlap = (
+        set(train_df['Patient_ID']) & set(val_df['Patient_ID'])
+    ) | (
+        set(train_df['Patient_ID']) & set(test_df['Patient_ID'])
+    ) | (
+        set(val_df['Patient_ID']) & set(test_df['Patient_ID'])
+    )
+    if overlap:
+        raise RuntimeError(f"Data leakage detected: patient overlap across splits: {sorted(overlap)}")
+
     return train_df, val_df, test_df
 
 
 def save_results_to_excel(all_results: list, fold_performance: list, output_path: str):
-    """
-    Save training results to Excel file.
-
-    Args:
-        all_results: List of dictionaries with detailed training logs
-        fold_performance: List of test MAE scores for each fold
-        output_path: Path to save Excel file
-    """
     results_df = pd.DataFrame(all_results)
     summary_df = pd.DataFrame({
         'Fold': range(1, len(fold_performance) + 1),
@@ -222,24 +187,14 @@ def save_fold_predictions(
         fold_idx: int,
         output_dir: str = "experiments_height_pytorch"
 ):
-    """
-    Saves the individual patient predictions and errors for the test set of a fold.
-    """
-    # Create a copy to avoid modifying the original dataframe
     results_df = test_df.copy()
-
-    # Attach predictions
     results_df['Predicted_Height'] = predictions.flatten()
 
-    # Calculate Absolute Error (assuming the true label column is 'Height' or 'height_cm')
     true_label_col = 'Height' if 'Height' in results_df.columns else 'height_cm'
     results_df['Absolute_Error'] = np.abs(results_df['Predicted_Height'] - results_df[true_label_col])
 
-    # Sort by Absolute Error (Descending) to easily see the worst predictions at the top
     results_df = results_df.sort_values(by='Absolute_Error', ascending=False)
 
-    # Select and reorder the most important columns to look at
-    # (Keeping the file path in case you want to manually inspect bad predictions)
     display_cols = ['Patient_ID', true_label_col, 'Predicted_Height', 'Absolute_Error']
     if 'Localizer_Path_NIfTI' in results_df.columns:
         display_cols.append('Localizer_Path_NIfTI')
@@ -248,7 +203,6 @@ def save_fold_predictions(
 
     results_df = results_df[display_cols]
 
-    # Save to CSV
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"fold_{fold_idx + 1}_patient_predictions.csv"
