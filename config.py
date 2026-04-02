@@ -7,7 +7,7 @@ from pathlib import Path
 # PATH CONFIGURATION
 # ============================================================================
 BASE_DIR = Path(__file__).resolve().parent
-EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_expanded - Copy.xlsx'
+EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_expanded.xlsx'
 NIFTI_ROOT = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/rambam_nifti_localizers'
 EXPERIMENTS_DIR = BASE_DIR / 'experiments_height_pytorch'
 
@@ -63,7 +63,7 @@ RANDOM_SEED = 42
 
 # Training hyperparameters
 BATCH_SIZE = 16
-NUM_EPOCHS = 50
+NUM_EPOCHS = 100
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-5
 LOSS_NAME = 'mse'
@@ -86,6 +86,14 @@ FORCED_TEST_PATIENTS_BY_FOLD = {
     2: 'C24',
     3: 'C38'
 }
+
+FORCED_VAL_PATIENTS_BY_FOLD = {
+    0: 'C22',
+    1: 'C24',
+    2: 'C38',
+    3: 'C19'
+}
+
 
 # ============================================================================
 # AUGMENTATION CONFIGURATION
