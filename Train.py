@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from typing import Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 
 from config import (
@@ -85,8 +85,11 @@ def evaluate(
 
 
 def train_fold(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, test_loader: DataLoader,
-               device: torch.device, fold_idx: int, num_epochs: int = NUM_EPOCHS) -> Dict:
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+               device: torch.device, fold_idx: int, num_epochs: int = NUM_EPOCHS,
+               learning_rate: float = LEARNING_RATE, weight_decay: float = WEIGHT_DECAY,
+               cosine_eta_min: float = COSINE_ETA_MIN, use_cosine_annealing: bool = USE_COSINE_ANNEALING,
+               trial_callback: Optional[Callable[[int, float], None]] = None) -> Dict:
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     if LOSS_NAME.lower() == 'mse':
         criterion = nn.MSELoss()
@@ -94,11 +97,11 @@ def train_fold(model: nn.Module, train_loader: DataLoader, val_loader: DataLoade
         raise ValueError(f"Unsupported LOSS_NAME: {LOSS_NAME}")
 
     scheduler = None
-    if USE_COSINE_ANNEALING:
+    if use_cosine_annealing:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=COSINE_T_MAX,
-            eta_min=COSINE_ETA_MIN,
+            T_max=min(COSINE_T_MAX, num_epochs),
+            eta_min=cosine_eta_min,
         )
 
     best_val_mse = float('inf')
@@ -135,6 +138,9 @@ def train_fold(model: nn.Module, train_loader: DataLoader, val_loader: DataLoade
                   f"Val MSE: {val_loss:8.3f} | "
                   f"Val MAE: {val_mae:6.2f} cm | "
                   f"LR: {current_lr:.2e}")
+
+        if trial_callback is not None:
+            trial_callback(epoch, val_mae)
 
         if val_loss < best_val_mse:
             best_val_mse = val_loss

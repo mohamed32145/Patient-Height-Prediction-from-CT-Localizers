@@ -67,3 +67,31 @@ Initial experiments showed the model "cheating" by measuring the distance betwee
 ---
 
 *Created by Mohamed Sliman*
+
+
+## Hyperparameter Tuning (Optuna)
+
+A practical 3-phase workflow is supported via `tune_optuna.py`:
+
+1. **Phase 1 (coarse):** 20-40 trials, ~15-20 epochs, optimize **mean CV validation MAE**.
+2. **Phase 2 (refine):** run full-epoch training around top configurations.
+3. **Phase 3 (lock):** choose the config with best mean MAE + low fold std.
+
+### Example (phase 1)
+
+```bash
+python tune_optuna.py --phase coarse --trials 24 --epochs 20
+```
+
+### Search space implemented
+
+- `lr`: `[3e-5, 1e-4, 2e-4]`
+- `weight_decay`: `[1e-6, 1e-5, 1e-4]`
+- `dropout`: `[0.2, 0.3, 0.4]`
+- `batch_size`: `[8, 16]`
+- `cosine_eta_min`: `[1e-7, 1e-6, 1e-5]`
+- `rotate_limit`: `[5, 10, 15]`
+- `brightness_contrast_prob`: `[0.1, 0.2, 0.3]`
+- `init_mode`: `-1..4` (random init, pretrained, and progressive stage freezing)
+
+Each trial logs parameters, fold MAEs, mean/std MAE, epoch count, and runtime to JSONL in `experiments_height_pytorch/optuna/`.

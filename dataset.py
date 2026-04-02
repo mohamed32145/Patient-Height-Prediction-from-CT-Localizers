@@ -33,9 +33,12 @@ class LocalizerDataset(Dataset):
             - Physically Accurate Cropping and Resizing (Preserves accurate mm/px for model)
             """
 
-            def __init__(self, df, is_train=False):
+            def __init__(self, df, is_train=False, rotate_limit=AUG_ROTATE_LIMIT,
+                         brightness_contrast_prob=AUG_BRIGHTNESS_CONTRAST_PROB):
                 self.df = df
                 self.is_train = is_train
+                self.rotate_limit = rotate_limit
+                self.brightness_contrast_prob = brightness_contrast_prob
 
                 # Define augmentation pipeline
                 if self.is_train:
@@ -46,7 +49,7 @@ class LocalizerDataset(Dataset):
                             shift_limit=AUG_SHIFT_LIMIT,
                             # FIXED: scale_limit set to 0.0 to prevent artificial zooming that breaks physical mm/px mapping
                             scale_limit=0.0,
-                            rotate_limit=AUG_ROTATE_LIMIT,
+                            rotate_limit=self.rotate_limit,
                             border_mode=cv2.BORDER_CONSTANT,  # border_mode=cv2.BORDER_CONSTANT
                             value=0,
                             p=AUG_SHIFT_SCALE_ROTATE_PROB
@@ -56,7 +59,7 @@ class LocalizerDataset(Dataset):
                         A.RandomBrightnessContrast(
                             brightness_limit=0.2,
                             contrast_limit=0.2,
-                            p=AUG_BRIGHTNESS_CONTRAST_PROB
+                            p=self.brightness_contrast_prob
                         ),
                         A.GaussNoise(var_limit=(0.001, 0.005), p=0.3),
 

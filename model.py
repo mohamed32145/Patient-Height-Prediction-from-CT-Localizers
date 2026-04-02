@@ -16,20 +16,26 @@ from config import (
 class HeightPredictor(nn.Module):
     """
     Height prediction model using EfficientNetV2 backbone + pixel-spacing metadata.
+
+    init_mode semantics:
+    -1: random initialization
+     0: ImageNet pretrained
+     1..4: ImageNet pretrained + progressively freeze earlier backbone stages
     """
 
-    def __init__(self, freeze_backbone: bool = False):
+    def __init__(self, dropout_rate: float = DROPOUT_RATE, init_mode: int = 0):
         super().__init__()
 
-        self.backbone = self._build_backbone(BACKBONE_NAME, USE_IMAGENET_PRETRAINED)
+        use_pretrained = init_mode >= 0 and USE_IMAGENET_PRETRAINED
+        self.backbone = self._build_backbone(BACKBONE_NAME, use_pretrained)
 
-        if freeze_backbone:
-            self._freeze_backbone()
+        if init_mode > 0:
+            self._freeze_backbone_stages(init_mode)
 
         self.meta_fc = nn.Sequential(
             nn.Linear(METADATA_DIM, 32),
             nn.ReLU(inplace=True),
-            nn.Dropout(DROPOUT_RATE / 2),
+            nn.Dropout(dropout_rate / 2),
             nn.Linear(32, METADATA_HIDDEN_DIM),
             nn.ReLU(inplace=True),
         )
@@ -37,7 +43,7 @@ class HeightPredictor(nn.Module):
         self.regressor = nn.Sequential(
             nn.Linear(BACKBONE_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
             nn.ReLU(inplace=True),
-            nn.Dropout(DROPOUT_RATE),
+            nn.Dropout(dropout_rate),
             nn.Linear(REGRESSOR_HIDDEN_DIM, 1),
         )
 
@@ -55,10 +61,23 @@ class HeightPredictor(nn.Module):
         backbone.classifier = nn.Identity()
         return backbone
 
-    def _freeze_backbone(self):
-        print("Freezing EfficientNetV2 backbone...")
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+    def _freeze_backbone_stages(self, freeze_level: int):
+        """Freeze progressively larger prefix of EfficientNet feature stages."""
+        freeze_level = int(max(1, min(4, freeze_level)))
+
+        # efficientnet_v2_s.features typically has 8 top-level blocks.
+        total_feature_blocks = len(self.backbone.features)
+        blocks_to_freeze = max(1, int(round((freeze_level / 4.0) * total_feature_blocks)))
+
+        print(
+            f"Freezing EfficientNetV2 backbone stages: "
+            f"level={freeze_level}, blocks={blocks_to_freeze}/{total_feature_blocks}"
+        )
+
+        for stage_idx, stage in enumerate(self.backbone.features):
+            if stage_idx < blocks_to_freeze:
+                for param in stage.parameters():
+                    param.requires_grad = False
 
     def unfreeze_backbone(self):
         print("Unfreezing EfficientNetV2 backbone...")
@@ -81,8 +100,8 @@ class HeightPredictor(nn.Module):
         return total_params, trainable_params
 
 
-def create_model(device: str = 'cuda') -> HeightPredictor:
-    model = HeightPredictor(freeze_backbone=False)
+def create_model(device: str = 'cuda', dropout_rate: float = DROPOUT_RATE, init_mode: int = 0) -> HeightPredictor:
+    model = HeightPredictor(dropout_rate=dropout_rate, init_mode=init_mode)
 
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
