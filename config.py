@@ -7,7 +7,7 @@ from pathlib import Path
 # PATH CONFIGURATION
 # ============================================================================
 BASE_DIR = Path(__file__).resolve().parent
-EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_expanded - Copy.xlsx'
+EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_expanded.xlsx'
 NIFTI_ROOT = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/rambam_nifti_localizers'
 EXPERIMENTS_DIR = BASE_DIR / 'experiments_height_pytorch'
 
