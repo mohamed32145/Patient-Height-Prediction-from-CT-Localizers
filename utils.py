@@ -276,13 +276,13 @@ def get_fold_dataframes_explicit(
     test_df  = data_df[data_df['Patient_ID'].isin(test_pats)].reset_index(drop=True)
 
     # Safety: ensure no leakage
+
     overlap = (
-        set(train_df['Patient_ID']) & set(val_df['Patient_ID'])
-    ) | (
-        set(train_df['Patient_ID']) & set(test_df['Patient_ID'])
-    ) | (
-        set(val_df['Patient_ID']) & set(test_df['Patient_ID'])
+            (set(train_df['Patient_ID']) & set(val_df['Patient_ID'])) |
+            (set(train_df['Patient_ID']) & set(test_df['Patient_ID'])) |
+            (set(val_df['Patient_ID']) & set(test_df['Patient_ID']))
     )
+
     if overlap:
         raise RuntimeError(f"Data leakage detected: patient overlap across splits: {sorted(overlap)}")
 
