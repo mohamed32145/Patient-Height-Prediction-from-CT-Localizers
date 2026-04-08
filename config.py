@@ -52,7 +52,7 @@ METADATA_HIDDEN_DIM = 8
 REGRESSOR_HIDDEN_DIM = 512
 
 # Dropout rate
-DROPOUT_RATE = 0.3
+DROPOUT_RATE = 0.2
 
 # ============================================================================
 # TRAINING CONFIGURATION
@@ -64,7 +64,7 @@ RANDOM_SEED = 42
 # Training hyperparameters
 BATCH_SIZE = 16
 NUM_EPOCHS = 100
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 2e-4
 WEIGHT_DECAY = 1e-5
 LOSS_NAME = 'mse'
 
@@ -72,7 +72,6 @@ LOSS_NAME = 'mse'
 USE_COSINE_ANNEALING = True
 COSINE_T_MAX = NUM_EPOCHS
 COSINE_ETA_MIN = 1e-6
-
 # Device configuration
 DEVICE = 'cuda'
 
@@ -102,9 +101,9 @@ FORCED_VAL_PATIENTS_BY_FOLD = {
 AUG_HORIZONTAL_FLIP_PROB = 0.3
 AUG_SHIFT_LIMIT = 0.1
 AUG_SCALE_LIMIT = 0.0
-AUG_ROTATE_LIMIT = 10
+AUG_ROTATE_LIMIT = 15
 AUG_SHIFT_SCALE_ROTATE_PROB = 0.8
-AUG_BRIGHTNESS_CONTRAST_PROB = 0.2
+AUG_BRIGHTNESS_CONTRAST_PROB = 0.3
 
 # ============================================================================
 # OUTPUT CONFIGURATION

@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from config import (
-    NUM_FOLDS, BATCH_SIZE, RESULTS_EXCEL_PATH,
+    NUM_FOLDS, BATCH_SIZE, RESULTS_EXCEL_PATH,DROPOUT_RATE,
     setup_directories, get_device,EXPERIMENTS_DIR,FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD
 )
 from utils import (
@@ -111,7 +111,7 @@ def main():
         )
 
         # Create fresh model for this fold
-        model = create_model(device=str(device))
+        model = create_model(device=str(device),dropout_rate=DROPOUT_RATE,init_mode=0)
 
         # Train the fold
         history = train_fold(

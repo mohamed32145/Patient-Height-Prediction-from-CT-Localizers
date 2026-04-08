@@ -10,7 +10,6 @@ from config import (
     USE_IMAGENET_PRETRAINED,
 )
 
-# --- NEW: We calculate this dynamically now ---
 # 256 channels * 16 vertical zones = 4096
 COMPRESSED_FEATURE_DIM = 4096
 
@@ -20,8 +19,12 @@ class HeightPredictor(nn.Module):
     Height prediction model using EfficientNetV2 features + 1x1 Conv + Vertical Pooling.
     """
 
-    def __init__(self, freeze_backbone: bool = False):
+    # UPDATED: Added dropout_rate and init_mode arguments
+    def __init__(self, dropout_rate=None, init_mode=0):
         super().__init__()
+
+        # Use provided dropout or fallback to config
+        self.dropout_rate = dropout_rate if dropout_rate is not None else DROPOUT_RATE
 
         # 1. Load the raw backbone
         weights = models.EfficientNet_V2_S_Weights.IMAGENET1K_V1 if USE_IMAGENET_PRETRAINED else None
@@ -29,29 +32,26 @@ class HeightPredictor(nn.Module):
         full_backbone = models.efficientnet_v2_s(weights=weights)
 
         # 2. Extract ONLY the feature layers
-        # (This leaves behind the useless 1x1 Global Average Pool and Classifier)
         self.feature_extractor = full_backbone.features
 
-        if freeze_backbone:
-            self._freeze_backbone()
+        # Apply partial freezing based on init_mode
+        self._apply_init_mode(init_mode)
 
         # 3. The Channel Compressor (1x1 Convolution)
-        # Squeezes 1280 channels down to 256 to prevent parameter explosion
         self.channel_compressor = nn.Sequential(
             nn.Conv2d(in_channels=1280, out_channels=256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
-            nn.SiLU(inplace=True)  # SiLU is the native activation function for EfficientNet
+            nn.SiLU(inplace=True)
         )
 
         # 4. The Vertical Ruler
-        # Averages width to 1, but preserves 16 height zones
         self.vertical_pool = nn.AdaptiveAvgPool2d((16, 1))
 
         # 5. Metadata Branch
         self.meta_fc = nn.Sequential(
             nn.Linear(METADATA_DIM, 32),
             nn.ReLU(inplace=True),
-            nn.Dropout(DROPOUT_RATE / 2),
+            nn.Dropout(self.dropout_rate / 2),  # Using dynamic dropout
             nn.Linear(32, METADATA_HIDDEN_DIM),
             nn.ReLU(inplace=True),
         )
@@ -60,14 +60,25 @@ class HeightPredictor(nn.Module):
         self.regressor = nn.Sequential(
             nn.Linear(COMPRESSED_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
             nn.ReLU(inplace=True),
-            nn.Dropout(DROPOUT_RATE),
+            nn.Dropout(self.dropout_rate),  # Using dynamic dropout
             nn.Linear(REGRESSOR_HIDDEN_DIM, 1),
         )
 
-    def _freeze_backbone(self):
-        print("Freezing EfficientNetV2 features...")
-        for param in self.feature_extractor.parameters():
-            param.requires_grad = False
+    def _apply_init_mode(self, init_mode):
+        """Freezes stages of the backbone based on init_mode integer."""
+        if init_mode <= 0:
+            print("init_mode=0: No layers frozen.")
+            return
+
+        print(f"Applying init_mode={init_mode} (Freezing first {init_mode} stages of backbone)...")
+        # EfficientNetV2 features are a Sequential block. We freeze the first 'init_mode' blocks.
+        for i, child in enumerate(self.feature_extractor.children()):
+            if i < init_mode:
+                for param in child.parameters():
+                    param.requires_grad = False
+            else:
+                for param in child.parameters():
+                    param.requires_grad = True
 
     def unfreeze_backbone(self):
         print("Unfreezing EfficientNetV2 features...")
@@ -75,28 +86,16 @@ class HeightPredictor(nn.Module):
             param.requires_grad = True
 
     def forward(self, images, spacings):
-        # Ensure 3-channel input
         if images.shape[1] == 1:
             images = images.repeat(1, 3, 1, 1)
 
-        # --- THE SPATIAL PIPELINE ---
-
-        # Step 1: Extract features (Output shape: Batch, 1280 channels, Height/32, Width/32)
         x = self.feature_extractor(images)
-
-        # Step 2: Compress channels (Output shape: Batch, 256 channels, Height/32, Width/32)
         x = self.channel_compressor(x)
-
-        # Step 3: Vertical Pool (Output shape: Batch, 256 channels, 16 vertical zones, 1 horizontal zone)
         x = self.vertical_pool(x)
-
-        # Step 4: Flatten for the linear layer (Output shape: Batch, 4096)
         img_feats = torch.flatten(x, 1)
 
-        # --- THE METADATA PIPELINE ---
         meta_feats = self.meta_fc(spacings)
 
-        # --- COMBINE & PREDICT ---
         combined = torch.cat((img_feats, meta_feats), dim=1)
         return self.regressor(combined)
 
@@ -106,8 +105,9 @@ class HeightPredictor(nn.Module):
         return total_params, trainable_params
 
 
-def create_model(device: str = 'cuda') -> HeightPredictor:
-    model = HeightPredictor(freeze_backbone=False)
+# UPDATED: Accept dropout_rate and init_mode
+def create_model(device: str = 'cuda', dropout_rate: float = None, init_mode: int = 0) -> HeightPredictor:
+    model = HeightPredictor(dropout_rate=dropout_rate, init_mode=init_mode)
 
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
