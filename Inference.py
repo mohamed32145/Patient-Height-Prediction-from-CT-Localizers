@@ -53,32 +53,25 @@ class HeightPredictor:
 
     def predict_single(
             self,
-            image_tensor: torch.Tensor,
-            spacing_tensor: torch.Tensor
+            image_tensor: torch.Tensor
     ) -> float:
         """
         Predict height for a single image.
 
         Args:
             image_tensor: Image tensor (C, H, W) or (1, C, H, W)
-            spacing_tensor: Spacing tensor (2,) or (1, 2)
+            
 
         Returns:
             Predicted height in cm
         """
-        # Ensure batch dimension
         if image_tensor.ndim == 3:
             image_tensor = image_tensor.unsqueeze(0)
-        if spacing_tensor.ndim == 1:
-            spacing_tensor = spacing_tensor.unsqueeze(0)
 
-        # Move to device
         image_tensor = image_tensor.to(self.device)
-        spacing_tensor = spacing_tensor.to(self.device)
 
-        # Predict
         with torch.no_grad():
-            prediction = self.model(image_tensor, spacing_tensor)
+            prediction = self.model(image_tensor)
 
         return prediction.item()
 
@@ -98,19 +91,16 @@ class HeightPredictor:
             Array of predictions or dict with details
         """
         all_predictions = []
-        all_spacings = []
         all_labels = []
 
         with torch.no_grad():
             for batch in dataloader:
-                images, spacings, labels = batch
+                images, labels = batch
                 images = images.to(self.device)
-                spacings = spacings.to(self.device)
 
-                predictions = self.model(images, spacings)
+                predictions = self.model(images)
 
                 all_predictions.append(predictions.cpu().numpy())
-                all_spacings.append(spacings.cpu().numpy())
                 all_labels.append(labels.numpy())
 
         predictions = np.concatenate(all_predictions, axis=0)
@@ -118,7 +108,6 @@ class HeightPredictor:
         if return_details:
             return {
                 'predictions': predictions.flatten(),
-                'spacings': np.concatenate(all_spacings, axis=0),
                 'labels': np.concatenate(all_labels, axis=0),
             }
 
@@ -150,8 +139,6 @@ class HeightPredictor:
         df_copy = df.copy()
         df_copy['predicted_height'] = results['predictions']
         df_copy['error'] = np.abs(df_copy['predicted_height'] - df_copy['height_cm'])
-        df_copy['spacing_x'] = results['spacings'][:, 0]
-        df_copy['spacing_y'] = results['spacings'][:, 1]
 
         return df_copy
 

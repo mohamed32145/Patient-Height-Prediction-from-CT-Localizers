@@ -1,213 +1,124 @@
-import cv2
-import numpy as np
-import nibabel as nib
-import torch
-import random
-from torch.utils.data import Dataset
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 import json
 import os
+import random
+
+import albumentations as A
+import cv2
+import nibabel as nib
+import numpy as np
+import torch
+from albumentations.pytorch import ToTensorV2
+from torch.utils.data import Dataset
 
 from config import (
-    IMG_SIZE, TARGET_PIXEL_SPACING_MM, WIN_MIN, WIN_MAX, THRESHOLD_VALUE,
-    AUG_HORIZONTAL_FLIP_PROB, AUG_SHIFT_LIMIT, AUG_SCALE_LIMIT,
-    AUG_ROTATE_LIMIT, AUG_SHIFT_SCALE_ROTATE_PROB,
-    AUG_BRIGHTNESS_CONTRAST_PROB
+    ALLOWED_PATIENT_POSITION,
+    AUGMENTATION_PROBABILITY,
+    AUG_BRIGHTNESS_LIMIT,
+    AUG_CONTRAST_LIMIT,
+    AUG_ERASE_MAX_FRACTION,
+    AUG_ROTATE_LIMIT,
+    HU_MAX,
+    HU_MIN,
+    IMG_HEIGHT,
+    IMG_WIDTH,
+    TARGET_PIXEL_SPACING_MM,
 )
 
-# EfficientNet ImageNet normalization
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 class LocalizerDataset(Dataset):
-    """
-    Dataset for loading and preprocessing CT Localizer images.
+    """Dataset for CT localizer preprocessing and loading."""
 
-    Features:
-    - Global Z-score Normalization
-    - Robust Orientation (Standardizes vertical alignment)
-    - Random Vertical Cropping (Simulates partial scans)
-    - Dynamic Padding & Adaptive Intensity Handling
-    - Physically Accurate Cropping and Resizing (Preserves accurate mm/px for model)
-    """
-
-    # --- THIS IS THE LINE THAT FIXES THE ERROR ---
-    def __init__(self, df, is_train=False, rotate_limit=None, brightness_contrast_prob=None):
-        self.df = df
+    def __init__(self, df, is_train=False):
+        self.df = df.reset_index(drop=True)
         self.is_train = is_train
 
-        # Fallback to config if Optuna doesn't provide them
-        self.rotate_limit = rotate_limit if rotate_limit is not None else AUG_ROTATE_LIMIT
-        self.brightness_prob = brightness_contrast_prob if brightness_contrast_prob is not None else AUG_BRIGHTNESS_CONTRAST_PROB
+        erase_holes = max(1, int(IMG_HEIGHT * AUG_ERASE_MAX_FRACTION / 32))
+        erase_w = max(8, int(IMG_WIDTH * AUG_ERASE_MAX_FRACTION))
+        erase_h = max(8, int(IMG_HEIGHT * AUG_ERASE_MAX_FRACTION))
 
-        # Define augmentation pipeline
         if self.is_train:
             self.transform = A.Compose([
-                # --- Geometric Augmentations ---
-                A.HorizontalFlip(p=AUG_HORIZONTAL_FLIP_PROB),
-                A.ShiftScaleRotate(
-                    shift_limit=AUG_SHIFT_LIMIT,
-                    # FIXED: scale_limit set to 0.0 to prevent artificial zooming that breaks physical mm/px mapping
-                    scale_limit=0.0,
-                    rotate_limit=self.rotate_limit,  # USING OPTUNA'S VALUE HERE
+                A.Rotate(
+                    limit=(-AUG_ROTATE_LIMIT, AUG_ROTATE_LIMIT),
                     border_mode=cv2.BORDER_CONSTANT,
-                    value=0,
-                    p=AUG_SHIFT_SCALE_ROTATE_PROB
+                    fill=0,
+                    p=AUGMENTATION_PROBABILITY,
                 ),
-
-                # --- Intensity Augmentations ---
                 A.RandomBrightnessContrast(
-                    brightness_limit=0.2,
-                    contrast_limit=0.2,
-                    p=self.brightness_prob  # USING OPTUNA'S VALUE HERE
+                    brightness_limit=AUG_BRIGHTNESS_LIMIT,
+                    contrast_limit=AUG_CONTRAST_LIMIT,
+                    p=AUGMENTATION_PROBABILITY,
                 ),
-                A.GaussNoise(var_limit=(0.001, 0.005), p=0.3),
-
-                # --- Normalization (Dataset Level) ---
-                A.Normalize(
-                    mean=IMAGENET_MEAN,
-                    std=IMAGENET_STD,
-                    max_pixel_value=1.0
+                A.CoarseDropout(
+                    num_holes_range=(1, erase_holes),
+                    hole_height_range=(8, erase_h),
+                    hole_width_range=(8, erase_w),
+                    fill=0,
+                    p=0.25,
                 ),
-
-                ToTensorV2()
+                A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255.0),
+                ToTensorV2(),
             ])
         else:
             self.transform = A.Compose([
-                A.Normalize(
-                    mean=IMAGENET_MEAN,
-                    std=IMAGENET_STD,
-                    max_pixel_value=1.0
-                ),
-                ToTensorV2()
+                A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255.0),
+                ToTensorV2(),
             ])
 
     def __len__(self):
         return len(self.df)
 
-    def get_background_value(self, img):
-        """Detects if background is Air (-1024) or Black (0)."""
-        min_val = np.min(img)
-        if min_val < -900:
-            return -1024
-        else:
-            return min_val
-
-    def load_json_metadata(self, nifti_path):
-        """Finds and loads the corresponding JSON sidecar file."""
+    @staticmethod
+    def load_json_metadata(nifti_path):
         json_path = nifti_path.replace('.nii.gz', '.json').replace('.nii', '.json')
-
         if os.path.exists(json_path):
             with open(json_path, 'r') as f:
                 return json.load(f)
-        return {}  # Return empty dict if missing
+        return {}
 
-    def orient_from_metadata(self, img_2d, metadata):
-        """
-        Determines rotation and flipping based strictly on DICOM tags.
-        Replaces the old threshold-based standardize_orientation.
-        """
-        rotated = False
-
-        # 1. Default to standard image if metadata is missing
+    @staticmethod
+    def is_allowed_position(metadata):
         if not metadata:
-            return img_2d, False
+            return False
+        return str(metadata.get('PatientPosition', '')).upper() == ALLOWED_PATIENT_POSITION
 
-        iop = metadata.get("ImageOrientationPatientDICOM", [1, 0, 0, 0, 1, 0])
-        position = metadata.get("PatientPosition", "HFS")  # HFS = Head First Supine
-
-        # 2. Extract Column Vector (how the image draws from top-to-bottom)
-        c_x, c_y, c_z = iop[3], iop[4], iop[5]
-
-        # 3. Check if image is Horizontal
-        # If the magnitude of X or Y is greater than Z, the spine is drawn sideways.
-        if abs(c_x) > abs(c_z) or abs(c_y) > abs(c_z):
-            # The image is horizontal. Rotate 90 degrees.
-            img_2d = cv2.rotate(img_2d, cv2.ROTATE_90_CLOCKWISE)
-            rotated = True
-
-        # 4. Handle Patient Position (HFS vs FFS)
-        if position.startswith("FFS"):
-            # Flip upside down if Feet First (Optional: Verify this visually on your dataset)
-            img_2d = cv2.flip(img_2d, 0)  # 0 = vertical flip
-
-        return img_2d, rotated
-
-    def trim_empty_vertical_space(self, img):
-        """Removes empty air above head and below feet."""
-        img_u8 = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        _, thresh = cv2.threshold(img_u8, 50, 255, cv2.THRESH_BINARY)
-
-        row_sums = np.sum(thresh, axis=1)
-        non_zero_rows = np.where(row_sums > 0)[0]
-
-        if len(non_zero_rows) > 0:
-            y_top = non_zero_rows[0]
-            y_bottom = non_zero_rows[-1]
-            return img[y_top:y_bottom, :]
-        return img
-
-    def random_vertical_crop(self, img):
-        """Randomly crops height to simulate partial scans."""
-        if not self.is_train:
-            return img
-
-        h, w = img.shape
-        min_fraction = 0.6
-        max_fraction = 1.0
-
-        crop_ratio = random.uniform(min_fraction, max_fraction)
-        new_h = int(h * crop_ratio)
-
-        max_y_start = h - new_h
-        y_start = random.randint(0, max_y_start)
-        y_end = y_start + new_h
-
-        return img[y_start:y_end, :]
-
-    def resample_to_target_spacing(self, img, spacing, target_spacing_mm=TARGET_PIXEL_SPACING_MM):
-        """Resample image to isotropic target pixel spacing before network resizing."""
+    @staticmethod
+    def resample_to_target_spacing(img, spacing, target_spacing_mm=TARGET_PIXEL_SPACING_MM):
         sx, sy = float(spacing[0]), float(spacing[1])
         h, w = img.shape
-
         new_w = max(1, int(round(w * (sx / target_spacing_mm))))
         new_h = max(1, int(round(h * (sy / target_spacing_mm))))
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-        resampled = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        return resampled, (target_spacing_mm, target_spacing_mm)
-
-    def resize_pad_dynamic_with_spacing(self, img, spacing, target_size):
-        """
-        FIXED: Resizes and pads using image-specific background value, and
-        recalculates the new pixel spacing so the model's metadata branch gets accurate data.
-        """
-        pad_value = self.get_background_value(img)
-
+    @staticmethod
+    def center_crop_or_pad(img, target_h=IMG_HEIGHT, target_w=IMG_WIDTH, pad_value=0):
         h, w = img.shape
 
-        scale = target_size / max(h, w)
+        if h < target_h or w < target_w:
+            out = np.full((max(h, target_h), max(w, target_w)), pad_value, dtype=img.dtype)
+            y0 = (out.shape[0] - h) // 2
+            x0 = (out.shape[1] - w) // 2
+            out[y0:y0 + h, x0:x0 + w] = img
+            img = out
+            h, w = img.shape
 
-        new_h, new_w = int(h * scale), int(w * scale)
+        start_y = (h - target_h) // 2
+        start_x = (w - target_w) // 2
+        return img[start_y:start_y + target_h, start_x:start_x + target_w]
 
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    @staticmethod
+    def make_clahe_rgb(img_u8):
+        clahe_32 = cv2.createCLAHE(clipLimit=32, tileGridSize=(2, 2))
+        clahe_64 = cv2.createCLAHE(clipLimit=64, tileGridSize=(1, 1))
 
-        final = np.full((target_size, target_size), pad_value, dtype=np.float32)
+        ch1 = img_u8
+        ch2 = cv2.add(img_u8, clahe_32.apply(img_u8))
+        ch3 = cv2.add(img_u8, clahe_64.apply(img_u8))
 
-        y_offset = (target_size - new_h) // 2
-
-        x_offset = (target_size - new_w) // 2
-
-        final[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
-
-        # Calculate the new spacing after resizing
-        new_spacing_x = spacing[0] / scale
-        new_spacing_y = spacing[1] / scale
-
-        new_spacing = (new_spacing_x, new_spacing_y)
-
-        return final, new_spacing
+        return np.stack([ch1, ch2, ch3], axis=-1)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -215,52 +126,32 @@ class LocalizerDataset(Dataset):
         height_label = float(row['height_cm'])
 
         try:
-            # 1. Load NIfTI
             nii = nib.load(nifti_path)
-            img_data = nii.get_fdata()
-            header = nii.header
-            json_meta = self.load_json_metadata(nifti_path)
+            img = nii.get_fdata()
+            spacing = nii.header.get_zooms()[:2]
+            metadata = self.load_json_metadata(nifti_path)
 
-            if img_data.ndim >= 3:
-                img_data = img_data.squeeze() if img_data.shape[-1] == 1 else np.max(img_data, axis=-1)
+            if not self.is_allowed_position(metadata):
+                raise ValueError(f'Unsupported patient position: {metadata.get("PatientPosition", "MISSING")}')
 
-            if img_data.ndim > 2:
-                img_data = img_data[..., img_data.shape[-1] // 2]
-            elif img_data.ndim < 2:
-                img_data = np.zeros((IMG_SIZE, IMG_SIZE))
+            if img.ndim >= 3:
+                img = img.squeeze() if img.shape[-1] == 1 else np.max(img, axis=-1)
+            if img.ndim > 2:
+                img = img[..., img.shape[-1] // 2]
 
-            spacing = header.get_zooms()[:2]
+            img = np.clip(img, HU_MIN, HU_MAX)
+            img = (img - HU_MIN) / float(HU_MAX - HU_MIN)
+            img_u8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
 
-            # 2. Windowing
-            img_data = np.clip(img_data, WIN_MIN, WIN_MAX)
-            img_data = (img_data - WIN_MIN) / (WIN_MAX - WIN_MIN)
+            img_u8 = self.resample_to_target_spacing(img_u8, spacing)
+            img_u8 = self.center_crop_or_pad(img_u8, IMG_HEIGHT, IMG_WIDTH, pad_value=0)
+            img_rgb = self.make_clahe_rgb(img_u8)
 
-            # 3. Orientation
-            img_data, rotated = self.orient_from_metadata(img_data, json_meta)
-            if rotated:
-                spacing = (spacing[1], spacing[0])
-
-            # 4. Trim Empty Space (Before cropping, so we crop the actual body)
-            img_data = self.trim_empty_vertical_space(img_data)
-
-            # 5. Random Vertical Crop (Augmentation)
-            img_data = self.random_vertical_crop(img_data)
-
-            # 7. Resample to 1 mm spacing, then resize/pad for model input
-            img_data, spacing_iso = self.resample_to_target_spacing(img_data, spacing)
-            img_data, updated_spacing = self.resize_pad_dynamic_with_spacing(img_data, spacing_iso, IMG_SIZE)
-
-            # 8. Create spacing tensor using the accurately calculated numbers
-            spacing_tensor = torch.tensor(updated_spacing, dtype=torch.float32)
-
-            # 9. Augmentations (includes Global Normalization)
-            img_data = img_data.astype(np.float32)
-            img_data = np.repeat(img_data[:, :, np.newaxis], 3, axis=2)
-            augmented = self.transform(image=img_data)
+            augmented = self.transform(image=img_rgb)
             img_tensor = augmented['image']
 
-            return img_tensor, spacing_tensor, torch.tensor(height_label, dtype=torch.float32)
+            return img_tensor, torch.tensor(height_label, dtype=torch.float32)
 
         except Exception as e:
-            print(f"Error loading {nifti_path}: {e}")
-            return (torch.zeros((3, IMG_SIZE, IMG_SIZE)), torch.zeros(2), torch.tensor(0.0))
+            print(f'Error loading {nifti_path}: {e}')
+            return torch.zeros((3, IMG_HEIGHT, IMG_WIDTH)), torch.tensor(0.0)
