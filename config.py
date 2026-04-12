@@ -22,9 +22,6 @@ TARGET_PIXEL_SPACING_MM = 1.0
 HU_MIN = -256
 HU_MAX = 1024
 
-# keep localizer orientation policy simple: only HFS is allowed
-ALLOWED_PATIENT_POSITION = 'HFS'
-
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================

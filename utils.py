@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 from pathlib import Path
 
 from config import (
-    ALLOWED_PATIENT_POSITION,
     EXCEL_PATH, NIFTI_ROOT, REQUIRED_COLUMNS,
     EXPERIMENTS_DIR, FORCED_TEST_PATIENTS_BY_FOLD, RANDOM_SEED
 )
@@ -48,26 +47,12 @@ def pick_nifti_file(nifti_dir: Path) -> Optional[Path]:
 
 
 
-def get_patient_position(nifti_path: Path) -> Optional[str]:
-    json_path = str(nifti_path).replace('.nii.gz', '.json').replace('.nii', '.json')
-    jp = Path(json_path)
-    if not jp.exists():
-        return None
-    try:
-        import json
-        with open(jp, 'r') as f:
-            meta = json.load(f)
-        return str(meta.get('PatientPosition', '')).upper()
-    except Exception:
-        return None
-
 def prepare_dataset() -> pd.DataFrame:
     df = load_and_validate_dataframe()
 
     rows = []
     skipped_unresolved_dir = 0
     skipped_no_files = 0
-    skipped_patient_position = 0
 
     for _, r in df.iterrows():
         pid = str(r['Patient_ID']).strip()
@@ -80,11 +65,6 @@ def prepare_dataset() -> pd.DataFrame:
         if f is None:
             skipped_no_files += 1
             continue
-        position = get_patient_position(f)
-        if position != ALLOWED_PATIENT_POSITION:
-            skipped_patient_position += 1
-            continue
-
         rows.append({
             'Patient_ID': pid,
             'nifti_path': str(f),
@@ -96,7 +76,6 @@ def prepare_dataset() -> pd.DataFrame:
     print(f"Resolved NIfTI files for {len(data_df)} rows")
     print(f"Skipped unresolved dir: {skipped_unresolved_dir}")
     print(f"Skipped empty NIfTI dir: {skipped_no_files}")
-    print(f"Skipped non-{ALLOWED_PATIENT_POSITION} patient position: {skipped_patient_position}")
     print(f"Total Patients: {data_df['Patient_ID'].nunique()}")
 
     return data_df

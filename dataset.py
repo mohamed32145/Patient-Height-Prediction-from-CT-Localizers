@@ -11,7 +11,6 @@ from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset
 
 from config import (
-    ALLOWED_PATIENT_POSITION,
     AUGMENTATION_PROBABILITY,
     AUG_BRIGHTNESS_LIMIT,
     AUG_CONTRAST_LIMIT,
@@ -80,12 +79,6 @@ class LocalizerDataset(Dataset):
         return {}
 
     @staticmethod
-    def is_allowed_position(metadata):
-        if not metadata:
-            return False
-        return str(metadata.get('PatientPosition', '')).upper() == ALLOWED_PATIENT_POSITION
-
-    @staticmethod
     def resample_to_target_spacing(img, spacing, target_spacing_mm=TARGET_PIXEL_SPACING_MM):
         sx, sy = float(spacing[0]), float(spacing[1])
         h, w = img.shape
@@ -129,11 +122,6 @@ class LocalizerDataset(Dataset):
             nii = nib.load(nifti_path)
             img = nii.get_fdata()
             spacing = nii.header.get_zooms()[:2]
-            metadata = self.load_json_metadata(nifti_path)
-
-            if not self.is_allowed_position(metadata):
-                raise ValueError(f'Unsupported patient position: {metadata.get("PatientPosition", "MISSING")}')
-
             if img.ndim >= 3:
                 img = img.squeeze() if img.shape[-1] == 1 else np.max(img, axis=-1)
             if img.ndim > 2:
