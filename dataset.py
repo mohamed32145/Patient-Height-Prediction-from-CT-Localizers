@@ -33,45 +33,37 @@ class LocalizerDataset(Dataset):
     - Physically Accurate Cropping and Resizing (Preserves accurate mm/px for model)
     """
 
-    # --- THIS IS THE LINE THAT FIXES THE ERROR ---
-    def __init__(self, df, is_train=False, rotate_limit=None, brightness_contrast_prob=None):
+    def __init__(self, df, is_train=False):
         self.df = df
         self.is_train = is_train
 
-        # Fallback to config if Optuna doesn't provide them
-        self.rotate_limit = rotate_limit if rotate_limit is not None else AUG_ROTATE_LIMIT
-        self.brightness_prob = brightness_contrast_prob if brightness_contrast_prob is not None else AUG_BRIGHTNESS_CONTRAST_PROB
-
-        # Define augmentation pipeline
         if self.is_train:
             self.transform = A.Compose([
                 # --- Geometric Augmentations ---
                 A.HorizontalFlip(p=AUG_HORIZONTAL_FLIP_PROB),
-                A.ShiftScaleRotate(
-                    shift_limit=AUG_SHIFT_LIMIT,
-                    # FIXED: scale_limit set to 0.0 to prevent artificial zooming that breaks physical mm/px mapping
-                    scale_limit=0.0,
-                    rotate_limit=self.rotate_limit,  # USING OPTUNA'S VALUE HERE
-                    border_mode=cv2.BORDER_CONSTANT,
-                    value=0,
+                A.Affine(
+                    translate_percent={
+                        "x": (-AUG_SHIFT_LIMIT, AUG_SHIFT_LIMIT),
+                        "y": (-AUG_SHIFT_LIMIT, AUG_SHIFT_LIMIT),
+                    },
+                    scale=1.0,
+                    rotate=(-AUG_ROTATE_LIMIT, AUG_ROTATE_LIMIT),
+                    fill=0,
                     p=AUG_SHIFT_SCALE_ROTATE_PROB
                 ),
-
                 # --- Intensity Augmentations ---
                 A.RandomBrightnessContrast(
                     brightness_limit=0.2,
                     contrast_limit=0.2,
-                    p=self.brightness_prob  # USING OPTUNA'S VALUE HERE
+                    p=AUG_BRIGHTNESS_CONTRAST_PROB
                 ),
-                A.GaussNoise(var_limit=(0.001, 0.005), p=0.3),
-
-                # --- Normalization (Dataset Level) ---
+                A.GaussNoise(std_range=(0.001, 0.005), p=0.3),
+                # --- Normalization ---
                 A.Normalize(
                     mean=IMAGENET_MEAN,
                     std=IMAGENET_STD,
                     max_pixel_value=1.0
                 ),
-
                 ToTensorV2()
             ])
         else:
@@ -241,7 +233,7 @@ class LocalizerDataset(Dataset):
                 spacing = (spacing[1], spacing[0])
 
             # 4. Trim Empty Space (Before cropping, so we crop the actual body)
-            img_data = self.trim_empty_vertical_space(img_data)
+            #img_data = self.trim_empty_vertical_space(img_data)
 
             # 5. Random Vertical Crop (Augmentation)
             img_data = self.random_vertical_crop(img_data)

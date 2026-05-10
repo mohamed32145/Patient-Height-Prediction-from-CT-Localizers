@@ -71,7 +71,7 @@ LOSS_NAME = 'mse'
 # LR scheduling
 USE_COSINE_ANNEALING = True
 COSINE_T_MAX = NUM_EPOCHS
-COSINE_ETA_MIN = 1e-6
+COSINE_ETA_MIN = 3e-5
 # Device configuration
 DEVICE = 'cuda'
 
@@ -99,9 +99,9 @@ FORCED_VAL_PATIENTS_BY_FOLD = {
 # ============================================================================
 # Training augmentations
 AUG_HORIZONTAL_FLIP_PROB = 0.3
-AUG_SHIFT_LIMIT = 0.1
+AUG_SHIFT_LIMIT = 0.05
 AUG_SCALE_LIMIT = 0.0
-AUG_ROTATE_LIMIT = 15
+AUG_ROTATE_LIMIT = 5
 AUG_SHIFT_SCALE_ROTATE_PROB = 0.8
 AUG_BRIGHTNESS_CONTRAST_PROB = 0.3
 
