@@ -4,12 +4,15 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from config import (
-    NUM_FOLDS, BATCH_SIZE, WEIGHTS_PATH, RESULTS_EXCEL_PATH,
-    setup_directories, get_device,EXPERIMENTS_DIR
+    NUM_FOLDS, BATCH_SIZE, RESULTS_EXCEL_PATH,DROPOUT_RATE,
+    setup_directories, get_device,EXPERIMENTS_DIR,FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD
 )
 from utils import (
-    prepare_dataset, create_fold_splits, get_fold_dataframes,
-    save_results_to_excel,save_fold_predictions
+    prepare_dataset,
+    create_fold_splits_train_val_test,
+    get_fold_dataframes_explicit,
+    save_results_to_excel,
+    save_fold_predictions
 )
 from dataset import LocalizerDataset
 from model import create_model
@@ -47,8 +50,16 @@ def main():
     # ========================================================================
     print("\nStep 2: Creating cross-validation splits...")
     print("-" * 80)
-    patient_groups, _ = create_fold_splits(data_df, num_folds=NUM_FOLDS)
 
+    test_groups, val_groups, train_groups, all_patient_ids = create_fold_splits_train_val_test(
+        data_df=data_df,
+        num_folds=NUM_FOLDS,
+        forced_test_patients_by_fold=FORCED_TEST_PATIENTS_BY_FOLD,
+        forced_val_patients_by_fold=FORCED_VAL_PATIENTS_BY_FOLD,  # optional; can omit to auto-derive
+        test_frac=0.25,
+        val_frac=0.20,
+        random_seed=42
+    )
 
     # ========================================================================
     # 3. ROTATING CROSS-VALIDATION LOOP
@@ -62,10 +73,14 @@ def main():
 
     for fold_idx in range(NUM_FOLDS):
         # Get train/val/test splits for this fold
-        train_df, val_df, test_df = get_fold_dataframes(
-            data_df, patient_groups, fold_idx
-        )
 
+        train_df, val_df, test_df = get_fold_dataframes_explicit(
+            data_df=data_df,
+            test_groups=test_groups,
+            val_groups=val_groups,
+            train_groups=train_groups,
+            fold_idx=fold_idx
+        )
 
         # Create datasets
         train_dataset = LocalizerDataset(train_df, is_train=True)
@@ -96,7 +111,7 @@ def main():
         )
 
         # Create fresh model for this fold
-        model = create_model(weights_path=str(WEIGHTS_PATH), device=str(device))
+        model = create_model(device=str(device),dropout_rate=DROPOUT_RATE,init_mode=0)
 
         # Train the fold
         history = train_fold(
@@ -119,8 +134,9 @@ def main():
             all_results.append({
                 'Fold': fold_idx + 1,
                 'Epoch': epoch_idx + 1,
-                'Train_MAE': train_loss,
-                'Val_MAE': val_loss,
+                'Train_MSE': train_loss,
+                'Val_MSE': val_loss,
+                'Val_MAE': history['val_mae'][epoch_idx],
                 'Test_MAE': None
             })
 
@@ -128,8 +144,9 @@ def main():
         all_results.append({
             'Fold': fold_idx + 1,
             'Epoch': 'TEST_FINAL',
-            'Train_MAE': None,
-            'Val_MAE': history['best_val_mae'],
+            'Train_MSE': None,
+            'Val_MSE': history['best_val_loss'],
+            'Val_MAE': None,
             'Test_MAE': history['test_mae']
         })
 

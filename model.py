@@ -1,161 +1,119 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from pathlib import Path
 
 from config import (
-    RESNET_FEATURE_DIM, METADATA_DIM, METADATA_HIDDEN_DIM,
-    REGRESSOR_HIDDEN_DIM, DROPOUT_RATE
+    DROPOUT_RATE,
+    METADATA_DIM,
+    METADATA_HIDDEN_DIM,
+    REGRESSOR_HIDDEN_DIM,
+    USE_IMAGENET_PRETRAINED,
 )
 
+# 256 channels * 16 vertical zones = 4096
+COMPRESSED_FEATURE_DIM = 4096
 
-class RadImageNetHubHeightPredictor(nn.Module):
+
+class HeightPredictor(nn.Module):
     """
-    Height prediction model using RadImageNet pretrained ResNet50.
-
-    Architecture:
-    - ResNet50 backbone (pretrained on RadImageNet)
-    - Metadata branch for pixel spacing
-    - Regression head combining image and metadata features
+    Height prediction model using EfficientNetV2 features + 1x1 Conv + Vertical Pooling.
     """
 
-    def __init__(self, weights_path: str = None, freeze_backbone: bool = False):
-        """
-        Args:
-            weights_path: Path to RadImageNet pretrained weights (.pt file)
-            freeze_backbone: Whether to freeze ResNet backbone weights
-        """
-        super(RadImageNetHubHeightPredictor, self).__init__()
+    # UPDATED: Added dropout_rate and init_mode arguments
+    def __init__(self, dropout_rate=None, init_mode=0):
+        super().__init__()
 
-        # 1. Initialize ResNet50 backbone
-        print("Initializing ResNet50 backbone...")
-        self.backbone = models.resnet50(weights=None)
+        # Use provided dropout or fallback to config
+        self.dropout_rate = dropout_rate if dropout_rate is not None else DROPOUT_RATE
 
-        # 2. Load RadImageNet weights if provided
-        if weights_path is not None:
-            self._load_pretrained_weights(weights_path)
+        # 1. Load the raw backbone
+        weights = models.EfficientNet_V2_S_Weights.IMAGENET1K_V1 if USE_IMAGENET_PRETRAINED else None
+        print(f"Initializing efficientnet_v2_s backbone...")
+        full_backbone = models.efficientnet_v2_s(weights=weights)
 
-        # 3. Remove original FC layer (we'll add our own regression head)
-        self.backbone.fc = nn.Identity()
+        # 2. Extract ONLY the feature layers
+        self.feature_extractor = full_backbone.features
 
-        # 4. Optionally freeze backbone
-        if freeze_backbone:
-            self._freeze_backbone()
+        # Apply partial freezing based on init_mode
+        self._apply_init_mode(init_mode)
 
-        self.meta_fc = nn.Sequential(
-            nn.Linear(2, 64),
-            nn.ReLU(),
-            nn.Linear(64, 256),  # Boost metadata to 256 dimensions
-            nn.ReLU())
-
-
-        self.regressor = nn.Sequential(
-            nn.Linear(2048 + 256, REGRESSOR_HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Dropout(DROPOUT_RATE),
-            nn.Linear(REGRESSOR_HIDDEN_DIM, 1)
+        # 3. The Channel Compressor (1x1 Convolution)
+        self.channel_compressor = nn.Sequential(
+            nn.Conv2d(in_channels=1280, out_channels=256, kernel_size=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.SiLU(inplace=True)
         )
 
-    def _load_pretrained_weights(self, weights_path: str):
-        """Load RadImageNet pretrained weights"""
-        weights_path = Path(weights_path)
+        # 4. The Vertical Ruler
+        self.vertical_pool = nn.AdaptiveAvgPool2d((16, 1))
 
-        if not weights_path.exists():
-            raise FileNotFoundError(
-                f"Pretrained weights not found at {weights_path}. "
-                "Please download RadImageNet weights or provide correct path."
-            )
+        # 5. Metadata Branch
+        self.meta_fc = nn.Sequential(
+            nn.Linear(METADATA_DIM, 32),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_rate / 2),  # Using dynamic dropout
+            nn.Linear(32, METADATA_HIDDEN_DIM),
+            nn.ReLU(inplace=True),
+        )
 
-        print(f"Loading RadImageNet weights from: {weights_path}")
+        # 6. Regression Head
+        self.regressor = nn.Sequential(
+            nn.Linear(COMPRESSED_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout_rate),  # Using dynamic dropout
+            nn.Linear(REGRESSOR_HIDDEN_DIM, 1),
+        )
 
-        try:
-            state_dict = torch.load(weights_path, map_location="cpu")
+    def _apply_init_mode(self, init_mode):
+        """Freezes stages of the backbone based on init_mode integer."""
+        if init_mode <= 0:
+            print("init_mode=0: No layers frozen.")
+            return
 
-            # Remove 'module.' prefix if present (from DataParallel training)
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                name = k.replace("module.", "")
-                new_state_dict[name] = v
-
-            # Load weights (strict=False because we're replacing the FC layer)
-            msg = self.backbone.load_state_dict(new_state_dict, strict=False)
-
-            print(f"✓ Weights loaded successfully")
-            print(f"  Missing keys (expected for FC layer): {len(msg.missing_keys)}")
-            if msg.unexpected_keys:
-                print(f"  Unexpected keys: {len(msg.unexpected_keys)}")
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to load pretrained weights: {e}")
-
-    def _freeze_backbone(self):
-        """Freeze all backbone parameters"""
-        print("Freezing ResNet50 backbone...")
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+        print(f"Applying init_mode={init_mode} (Freezing first {init_mode} stages of backbone)...")
+        # EfficientNetV2 features are a Sequential block. We freeze the first 'init_mode' blocks.
+        for i, child in enumerate(self.feature_extractor.children()):
+            if i < init_mode:
+                for param in child.parameters():
+                    param.requires_grad = False
+            else:
+                for param in child.parameters():
+                    param.requires_grad = True
 
     def unfreeze_backbone(self):
-        """Unfreeze all backbone parameters"""
-        print("Unfreezing ResNet50 backbone...")
-        for param in self.backbone.parameters():
+        print("Unfreezing EfficientNetV2 features...")
+        for param in self.feature_extractor.parameters():
             param.requires_grad = True
 
     def forward(self, images, spacings):
-        """
-        Forward pass.
-
-        Args:
-            images: Tensor of shape (batch, channels, height, width)
-            spacings: Tensor of shape (batch, 2) with pixel spacing metadata
-
-        Returns:
-            Tensor of shape (batch, 1) with height predictions
-        """
-        # Ensure 3-channel input
         if images.shape[1] == 1:
             images = images.repeat(1, 3, 1, 1)
 
-        # Extract image features from ResNet
-        img_feats = self.backbone(images)  # (batch, 2048)
+        x = self.feature_extractor(images)
+        x = self.channel_compressor(x)
+        x = self.vertical_pool(x)
+        img_feats = torch.flatten(x, 1)
 
-        # Process metadata
         meta_feats = self.meta_fc(spacings)
 
-        # Combine features
-        combined = torch.cat((img_feats, meta_feats), dim=1)  # (batch, 2056)
-
-        # Predict height
-        height_pred = self.regressor(combined)  # (batch, 1)
-
-        return height_pred
+        combined = torch.cat((img_feats, meta_feats), dim=1)
+        return self.regressor(combined)
 
     def get_num_params(self):
-        """Get total number of parameters and trainable parameters"""
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total_params, trainable_params
 
 
-def create_model(weights_path: str = None, device: str = 'cuda') -> RadImageNetHubHeightPredictor:
-    """
-    Factory function to create and initialize the model.
+# UPDATED: Accept dropout_rate and init_mode
+def create_model(device: str = 'cuda', dropout_rate: float = None, init_mode: int = 0) -> HeightPredictor:
+    model = HeightPredictor(dropout_rate=dropout_rate, init_mode=init_mode)
 
-    Args:
-        weights_path: Path to RadImageNet weights
-        device: Device to move model to ('cuda' or 'cpu')
-
-    Returns:
-        Initialized model on specified device
-    """
-    model = RadImageNetHubHeightPredictor(weights_path=weights_path)
-
-    # Move to device
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    # Print model info
     total_params, trainable_params = model.get_num_params()
-    print(f"\nModel Summary:")
+    print("\nModel Summary:")
     print(f"  Total parameters: {total_params:,}")
     print(f"  Trainable parameters: {trainable_params:,}")
     print(f"  Device: {device}")
@@ -164,16 +122,14 @@ def create_model(weights_path: str = None, device: str = 'cuda') -> RadImageNetH
 
 
 if __name__ == "__main__":
-    # Test model creation
     print("Testing model creation...")
-    model = RadImageNetHubHeightPredictor(weights_path=None)
+    model = HeightPredictor()
 
-    # Test forward pass
-    dummy_images = torch.randn(2, 3, 256, 256)
+    dummy_images = torch.randn(2, 3, 384, 384)
     dummy_spacings = torch.randn(2, 2)
 
     output = model(dummy_images, dummy_spacings)
-    print(f"\nTest forward pass:")
+    print("\nTest forward pass:")
     print(f"  Input shape: {dummy_images.shape}")
     print(f"  Spacing shape: {dummy_spacings.shape}")
     print(f"  Output shape: {output.shape}")
