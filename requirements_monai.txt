@@ -1,0 +1,6 @@
+# Extra dependencies for the MONAI-integrated branch.
+# Install on top of your existing PyTorch / torchvision environment:
+#   pip install -r requirements_monai.txt
+monai>=1.3.0
+nibabel>=5.0.0
+opencv-python>=4.8.0
