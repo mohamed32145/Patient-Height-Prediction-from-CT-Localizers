@@ -4,8 +4,6 @@ import torchvision.models as models
 
 from config import (
     DROPOUT_RATE,
-    METADATA_DIM,
-    METADATA_HIDDEN_DIM,
     REGRESSOR_HIDDEN_DIM,
     USE_IMAGENET_PRETRAINED,
 )
@@ -17,6 +15,10 @@ COMPRESSED_FEATURE_DIM = 4096
 class HeightPredictor(nn.Module):
     """
     Height prediction model using EfficientNetV2 features + 1x1 Conv + Vertical Pooling.
+
+    Image-only: the model predicts height purely from the image. The pixel-spacing
+    metadata branch has been removed; spacing is still used for image preprocessing
+    (resampling to isotropic spacing) but is no longer fed to the network.
     """
 
     # UPDATED: Added dropout_rate and init_mode arguments
@@ -47,18 +49,9 @@ class HeightPredictor(nn.Module):
         # 4. The Vertical Ruler
         self.vertical_pool = nn.AdaptiveAvgPool2d((16, 1))
 
-        # 5. Metadata Branch
-        self.meta_fc = nn.Sequential(
-            nn.Linear(METADATA_DIM, 32),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout_rate / 2),  # Using dynamic dropout
-            nn.Linear(32, METADATA_HIDDEN_DIM),
-            nn.ReLU(inplace=True),
-        )
-
-        # 6. Regression Head
+        # 5. Regression Head (image features only)
         self.regressor = nn.Sequential(
-            nn.Linear(COMPRESSED_FEATURE_DIM + METADATA_HIDDEN_DIM, REGRESSOR_HIDDEN_DIM),
+            nn.Linear(COMPRESSED_FEATURE_DIM, REGRESSOR_HIDDEN_DIM),
             nn.ReLU(inplace=True),
             nn.Dropout(self.dropout_rate),  # Using dynamic dropout
             nn.Linear(REGRESSOR_HIDDEN_DIM, 1),
@@ -85,7 +78,7 @@ class HeightPredictor(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = True
 
-    def forward(self, images, spacings):
+    def forward(self, images):
         if images.shape[1] == 1:
             images = images.repeat(1, 3, 1, 1)
 
@@ -94,10 +87,7 @@ class HeightPredictor(nn.Module):
         x = self.vertical_pool(x)
         img_feats = torch.flatten(x, 1)
 
-        meta_feats = self.meta_fc(spacings)
-
-        combined = torch.cat((img_feats, meta_feats), dim=1)
-        return self.regressor(combined)
+        return self.regressor(img_feats)
 
     def get_num_params(self):
         total_params = sum(p.numel() for p in self.parameters())
@@ -126,11 +116,9 @@ if __name__ == "__main__":
     model = HeightPredictor()
 
     dummy_images = torch.randn(2, 3, 384, 384)
-    dummy_spacings = torch.randn(2, 2)
 
-    output = model(dummy_images, dummy_spacings)
+    output = model(dummy_images)
     print("\nTest forward pass:")
     print(f"  Input shape: {dummy_images.shape}")
-    print(f"  Spacing shape: {dummy_spacings.shape}")
     print(f"  Output shape: {output.shape}")
     print("✓ Model test passed!")

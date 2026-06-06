@@ -44,11 +44,9 @@ BACKBONE_NAME = 'efficientnet_v2_s'
 BACKBONE_FEATURE_DIM = 1280
 USE_IMAGENET_PRETRAINED = True
 
-# Metadata (pixel spacing) dimension
-METADATA_DIM = 2
-
 # Hidden layer dimensions
-METADATA_HIDDEN_DIM = 8
+# NOTE: The pixel-spacing metadata branch was removed; the model is image-only.
+# Spacing is still used for image preprocessing (resampling to TARGET_PIXEL_SPACING_MM).
 REGRESSOR_HIDDEN_DIM = 512
 
 # Dropout rate

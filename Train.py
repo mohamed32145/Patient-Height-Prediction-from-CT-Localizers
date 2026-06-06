@@ -29,13 +29,12 @@ def train_one_epoch(
     running_loss = 0.0
     num_samples = 0
 
-    for images, spacings, labels in train_loader:
+    for images, labels in train_loader:
         images = images.to(device)
-        spacings = spacings.to(device)
         labels = labels.to(device).unsqueeze(1)
 
         optimizer.zero_grad()
-        outputs = model(images, spacings)
+        outputs = model(images)
         loss = criterion(outputs, labels)
 
         loss.backward()
@@ -61,12 +60,11 @@ def evaluate(
     all_labels = []
 
     with torch.no_grad():
-        for images, spacings, labels in data_loader:
+        for images, labels in data_loader:
             images = images.to(device)
-            spacings = spacings.to(device)
             labels = labels.to(device).unsqueeze(1)
 
-            outputs = model(images, spacings)
+            outputs = model(images)
             loss = criterion(outputs, labels)
 
             batch_size = images.size(0)

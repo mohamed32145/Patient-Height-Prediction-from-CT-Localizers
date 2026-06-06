@@ -160,7 +160,11 @@ class LocalizerDataset(Dataset):
         return img[y_start:y_end, :]
 
     def resample_to_target_spacing(self, img, spacing, target_spacing_mm=TARGET_PIXEL_SPACING_MM):
-        """Resample image to isotropic target pixel spacing before network resizing."""
+        """Resample image to isotropic target pixel spacing before network resizing.
+
+        Spacing is used here only to normalize the physical scale of the image; it is
+        not passed to the model.
+        """
         sx, sy = float(spacing[0]), float(spacing[1])
         h, w = img.shape
 
@@ -168,13 +172,10 @@ class LocalizerDataset(Dataset):
         new_h = max(1, int(round(h * (sy / target_spacing_mm))))
 
         resampled = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        return resampled, (target_spacing_mm, target_spacing_mm)
+        return resampled
 
-    def resize_pad_dynamic_with_spacing(self, img, spacing, target_size):
-        """
-        FIXED: Resizes and pads using image-specific background value, and
-        recalculates the new pixel spacing so the model's metadata branch gets accurate data.
-        """
+    def resize_pad_dynamic(self, img, target_size):
+        """Resizes and pads to a square target using the image-specific background value."""
         pad_value = self.get_background_value(img)
 
         h, w = img.shape
@@ -193,13 +194,7 @@ class LocalizerDataset(Dataset):
 
         final[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
 
-        # Calculate the new spacing after resizing
-        new_spacing_x = spacing[0] / scale
-        new_spacing_y = spacing[1] / scale
-
-        new_spacing = (new_spacing_x, new_spacing_y)
-
-        return final, new_spacing
+        return final
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -239,20 +234,17 @@ class LocalizerDataset(Dataset):
             img_data = self.random_vertical_crop(img_data)
 
             # 7. Resample to 1 mm spacing, then resize/pad for model input
-            img_data, spacing_iso = self.resample_to_target_spacing(img_data, spacing)
-            img_data, updated_spacing = self.resize_pad_dynamic_with_spacing(img_data, spacing_iso, IMG_SIZE)
+            img_data = self.resample_to_target_spacing(img_data, spacing)
+            img_data = self.resize_pad_dynamic(img_data, IMG_SIZE)
 
-            # 8. Create spacing tensor using the accurately calculated numbers
-            spacing_tensor = torch.tensor(updated_spacing, dtype=torch.float32)
-
-            # 9. Augmentations (includes Global Normalization)
+            # 8. Augmentations (includes Global Normalization)
             img_data = img_data.astype(np.float32)
             img_data = np.repeat(img_data[:, :, np.newaxis], 3, axis=2)
             augmented = self.transform(image=img_data)
             img_tensor = augmented['image']
 
-            return img_tensor, spacing_tensor, torch.tensor(height_label, dtype=torch.float32)
+            return img_tensor, torch.tensor(height_label, dtype=torch.float32)
 
         except Exception as e:
             print(f"Error loading {nifti_path}: {e}")
-            return (torch.zeros((3, IMG_SIZE, IMG_SIZE)), torch.zeros(2), torch.tensor(0.0))
+            return (torch.zeros((3, IMG_SIZE, IMG_SIZE)), torch.tensor(0.0))

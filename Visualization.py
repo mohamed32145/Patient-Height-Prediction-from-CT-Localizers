@@ -38,20 +38,19 @@ class GradCAM:
         """Hook to save backward pass gradients"""
         self.gradients = grad_output[0].detach()
 
-    def generate_cam(self, input_image, input_spacing):
+    def generate_cam(self, input_image):
         """
         Generate Class Activation Map.
 
         Args:
             input_image: Input tensor (1, C, H, W)
-            input_spacing: Spacing tensor (1, 2)
 
         Returns:
             CAM heatmap as numpy array
         """
         # Forward pass
         self.model.eval()
-        output = self.model(input_image, input_spacing)
+        output = self.model(input_image)
 
         # Backward pass
         self.model.zero_grad()
@@ -74,7 +73,6 @@ class GradCAM:
     def visualize(
             self,
             input_image,
-            input_spacing,
             original_image=None,
             alpha=0.4,
             colormap=cv2.COLORMAP_JET
@@ -84,7 +82,6 @@ class GradCAM:
 
         Args:
             input_image: Input tensor (1, C, H, W)
-            input_spacing: Spacing tensor (1, 2)
             original_image: Original image for overlay (optional)
             alpha: Transparency of heatmap overlay
             colormap: OpenCV colormap for heatmap
@@ -93,7 +90,7 @@ class GradCAM:
             Tuple of (heatmap, overlay_image)
         """
         # Generate CAM
-        cam = self.generate_cam(input_image, input_spacing)
+        cam = self.generate_cam(input_image)
 
         # Resize to match input size
         cam = cv2.resize(cam, (input_image.shape[3], input_image.shape[2]))
@@ -139,7 +136,7 @@ def visualize_dataset_samples(
         axes = [axes]
 
     for idx, ax in zip(indices, axes):
-        img_tensor, spacing, height = dataset[idx]
+        img_tensor, height = dataset[idx]
 
         # Convert to numpy and denormalize
         img = img_tensor[0].numpy()  # Take first channel
@@ -147,8 +144,7 @@ def visualize_dataset_samples(
         ax.imshow(img, cmap='gray')
         ax.set_title(
             f"{title_prefix} {idx}\n"
-            f"Height: {height:.1f} cm\n"
-            f"Spacing: ({spacing[0]:.2f}, {spacing[1]:.2f})"
+            f"Height: {height:.1f} cm"
         )
         ax.axis('off')
 

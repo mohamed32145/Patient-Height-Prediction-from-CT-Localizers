@@ -92,7 +92,7 @@ def visualize_predictions(model_path, fold_idx=0, num_samples=10):
 
     # Collect images for visualization
     all_images = []
-    for images, _, _ in test_loader:
+    for images, _ in test_loader:
         all_images.append(images.cpu().numpy())
     all_images = np.concatenate(all_images, axis=0)
 
@@ -162,18 +162,17 @@ def visualize_gradcam(model_path, num_samples=3, fold_idx=0):
     for i in range(min(num_samples, len(test_dataset))):
         print(f"\nGenerating GradCAM for sample {i + 1}/{num_samples}...")
 
-        image, spacing, label = test_dataset[i]
+        image, label = test_dataset[i]
 
         # Prepare for model
         image_batch = image.unsqueeze(0).to(device)
-        spacing_batch = spacing.unsqueeze(0).to(device)
 
         # Get prediction
         with torch.no_grad():
-            prediction = model(image_batch, spacing_batch).item()
+            prediction = model(image_batch).item()
 
         # Generate GradCAM
-        heatmap, overlay = gradcam.visualize(image_batch, spacing_batch)
+        heatmap, overlay = gradcam.visualize(image_batch)
 
         # Original image
         original = image[0].cpu().numpy()
