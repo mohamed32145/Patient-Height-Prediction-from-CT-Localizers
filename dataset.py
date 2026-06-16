@@ -227,6 +227,11 @@ class LocalizerDataset(Dataset):
             img_data = np.clip(img_data, WIN_MIN, WIN_MAX)
             img_data = (img_data - WIN_MIN) / (WIN_MAX - WIN_MIN)
 
+            img_min = img_data.min()
+            img_max = img_data.max()
+            if img_max > img_min:
+                img_data = (img_data - img_min) / (img_max - img_min)
+
             # 3. Orientation
             img_data, rotated = self.orient_from_metadata(img_data, json_meta)
             if rotated:

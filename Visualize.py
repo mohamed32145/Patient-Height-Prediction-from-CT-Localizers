@@ -8,7 +8,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from config import get_device, WEIGHTS_PATH, IMG_SIZE
-from utils import prepare_dataset, create_fold_splits, get_fold_dataframes
+from utils import prepare_dataset
 from dataset import LocalizerDataset
 from model import create_model
 from Visualization import (
