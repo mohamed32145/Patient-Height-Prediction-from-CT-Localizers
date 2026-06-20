@@ -7,8 +7,8 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from config import get_device, WEIGHTS_PATH, IMG_SIZE
-from utils import prepare_dataset
+from config import get_device, WEIGHTS_PATH, FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD,NUM_FOLDS
+from utils import prepare_dataset,create_fold_splits_train_val_test,get_fold_dataframes_explicit
 from dataset import LocalizerDataset
 from model import create_model
 from Visualization import (
@@ -35,8 +35,25 @@ def visualize_dataset(num_samples=5, data_subset='train'):
 
     # Load data
     data_df = prepare_dataset()
-    patient_groups, _ = create_fold_splits(data_df, num_folds=4)
-    train_df, val_df, test_df = get_fold_dataframes(data_df, patient_groups, fold_idx=0)
+    test_groups, val_groups, train_groups, all_patient_ids = create_fold_splits_train_val_test(
+        data_df=data_df,
+        num_folds=NUM_FOLDS,
+        forced_test_patients_by_fold=FORCED_TEST_PATIENTS_BY_FOLD,
+        forced_val_patients_by_fold=FORCED_VAL_PATIENTS_BY_FOLD,  # optional; can omit to auto-derive
+        test_frac=0.25,
+        val_frac=0.20,
+        random_seed=42
+    )
+    for fold_idx in range(NUM_FOLDS):
+
+
+        train_df, val_df, test_df = get_fold_dataframes_explicit(
+            data_df=data_df,
+            test_groups=test_groups,
+            val_groups=val_groups,
+            train_groups=train_groups,
+            fold_idx=fold_idx
+        )
 
     # Select subset
     if data_subset == 'train':
@@ -75,8 +92,23 @@ def visualize_predictions(model_path, fold_idx=0, num_samples=10):
 
     # Load data
     data_df = prepare_dataset()
-    patient_groups, _ = create_fold_splits(data_df, num_folds=4)
-    _, _, test_df = get_fold_dataframes(data_df, patient_groups, fold_idx=fold_idx)
+    test_groups, val_groups, train_groups, all_patient_ids = create_fold_splits_train_val_test(
+        data_df=data_df,
+        num_folds=NUM_FOLDS,
+        forced_test_patients_by_fold=FORCED_TEST_PATIENTS_BY_FOLD,
+        forced_val_patients_by_fold=FORCED_VAL_PATIENTS_BY_FOLD,  # optional; can omit to auto-derive
+        test_frac=0.25,
+        val_frac=0.20,
+        random_seed=42
+    )
+    for fold_idx in range(NUM_FOLDS):
+        train_df, val_df, test_df = get_fold_dataframes_explicit(
+            data_df=data_df,
+            test_groups=test_groups,
+            val_groups=val_groups,
+            train_groups=train_groups,
+            fold_idx=fold_idx
+        )
 
     # Create dataset and loader
     test_dataset = LocalizerDataset(test_df, is_train=False)
@@ -143,8 +175,23 @@ def visualize_gradcam(model_path, num_samples=3, fold_idx=0):
 
     # Load data
     data_df = prepare_dataset()
-    patient_groups, _ = create_fold_splits(data_df, num_folds=4)
-    _, _, test_df = get_fold_dataframes(data_df, patient_groups, fold_idx=fold_idx)
+    test_groups, val_groups, train_groups, all_patient_ids = create_fold_splits_train_val_test(
+        data_df=data_df,
+        num_folds=NUM_FOLDS,
+        forced_test_patients_by_fold=FORCED_TEST_PATIENTS_BY_FOLD,
+        forced_val_patients_by_fold=FORCED_VAL_PATIENTS_BY_FOLD,  # optional; can omit to auto-derive
+        test_frac=0.25,
+        val_frac=0.20,
+        random_seed=42
+    )
+    for fold_idx in range(NUM_FOLDS):
+        train_df, val_df, test_df = get_fold_dataframes_explicit(
+            data_df=data_df,
+            test_groups=test_groups,
+            val_groups=val_groups,
+            train_groups=train_groups,
+            fold_idx=fold_idx
+        )
 
     # Create dataset
     test_dataset = LocalizerDataset(test_df, is_train=False)
