@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from config import get_device, WEIGHTS_PATH, FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD,NUM_FOLDS
+from config import get_device, FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD,NUM_FOLDS
 from utils import prepare_dataset,create_fold_splits_train_val_test,get_fold_dataframes_explicit
 from dataset import LocalizerDataset
 from model import create_model
@@ -44,16 +44,13 @@ def visualize_dataset(num_samples=5, data_subset='train'):
         val_frac=0.20,
         random_seed=42
     )
-    for fold_idx in range(NUM_FOLDS):
-
-
-        train_df, val_df, test_df = get_fold_dataframes_explicit(
-            data_df=data_df,
-            test_groups=test_groups,
-            val_groups=val_groups,
-            train_groups=train_groups,
-            fold_idx=fold_idx
-        )
+    train_df, val_df, test_df = get_fold_dataframes_explicit(
+        data_df=data_df,
+        test_groups=test_groups,
+        val_groups=val_groups,
+        train_groups=train_groups,
+        fold_idx=0
+    )
 
     # Select subset
     if data_subset == 'train':
@@ -101,14 +98,13 @@ def visualize_predictions(model_path, fold_idx=0, num_samples=10):
         val_frac=0.20,
         random_seed=42
     )
-    for fold_idx in range(NUM_FOLDS):
-        train_df, val_df, test_df = get_fold_dataframes_explicit(
-            data_df=data_df,
-            test_groups=test_groups,
-            val_groups=val_groups,
-            train_groups=train_groups,
-            fold_idx=fold_idx
-        )
+    train_df, val_df, test_df = get_fold_dataframes_explicit(
+        data_df=data_df,
+        test_groups=test_groups,
+        val_groups=val_groups,
+        train_groups=train_groups,
+        fold_idx=0
+    )
 
     # Create dataset and loader
     test_dataset = LocalizerDataset(test_df, is_train=False)
@@ -184,26 +180,29 @@ def visualize_gradcam(model_path, num_samples=3, fold_idx=0):
         val_frac=0.20,
         random_seed=42
     )
-    for fold_idx in range(NUM_FOLDS):
-        train_df, val_df, test_df = get_fold_dataframes_explicit(
-            data_df=data_df,
-            test_groups=test_groups,
-            val_groups=val_groups,
-            train_groups=train_groups,
-            fold_idx=fold_idx
-        )
+    train_df, val_df, test_df = get_fold_dataframes_explicit(
+        data_df=data_df,
+        test_groups=test_groups,
+        val_groups=val_groups,
+        train_groups=train_groups,
+        fold_idx=0
+    )
 
     # Create dataset
     test_dataset = LocalizerDataset(test_df, is_train=False)
 
     # Load model
     print("Loading model...")
-    model = create_model(weights_path=str(WEIGHTS_PATH), device=str(device))
+    model = create_model(device=str(device))
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     # Create GradCAM
-    gradcam = GradCAM(model, target_layer=model.backbone.layer4)
+    gradcam = GradCAM(model, target_layer=model.feature_extractor[-1])
+
+    # ImageNet denormalization constants
+    imagenet_mean = np.array([0.485, 0.456, 0.406])
+    imagenet_std = np.array([0.229, 0.224, 0.225])
 
     # Visualize samples
     for i in range(min(num_samples, len(test_dataset))):
@@ -220,10 +219,15 @@ def visualize_gradcam(model_path, num_samples=3, fold_idx=0):
             prediction = model(image_batch, spacing_batch).item()
 
         # Generate GradCAM
-        heatmap, overlay = gradcam.visualize(image_batch, spacing_batch)
+        denorm_img = image.cpu().numpy().transpose(1, 2, 0)
+        denorm_img = (denorm_img * imagenet_std + imagenet_mean).clip(0, 1)
+        original_rgb = (denorm_img * 255).astype(np.uint8)
 
-        # Original image
-        original = image[0].cpu().numpy()
+        # Generate GradCAM with the denormalized image for a correct overlay
+        heatmap, overlay = gradcam.visualize(image_batch, spacing_batch, original_image=original_rgb)
+
+        # Original image (grayscale channel for display)
+        original = denorm_img[:, :, 0]
 
         # Plot
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
