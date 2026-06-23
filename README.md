@@ -1,68 +1,166 @@
+# Patient Height Prediction from CT Localizers
 
-#  Patient Height Prediction from CT Localizers
+A deep learning system that estimates patient height in centimeters from **CT Localizer (Scout/Topogram)** images. This is a **regression** problem that fuses image features from 2D X-ray-like scans with physical pixel spacing metadata to produce scale-aware height predictions.
 
-This project implements a Deep Learning solution to estimate a patient's height based on **CT Localizer (Scout/Topogram)** images.
+The project emphasizes **medical transfer learning**, **bias mitigation** against shortcut learning, and **model interpretability** via Grad-CAM.
 
-Unlike standard classification tasks, this is a **regression** problem that combines image data (2D X-Ray-like scans) with metadata (pixel spacing). The project explores the use of **RadImageNet** pre-trained weights versus standard ImageNet weights and places a strong emphasis on model interpretability using **Grad-CAM**.
+## Project Goal
 
-##  Project Goal
+Predict patient height from a single CT scout image by learning **anatomical proportions** (spine length, femur size, pelvis width) rather than image artifacts or padding boundaries.
 
-To accurately predict patient height in centimeters from a single 2D CT scout image, ensuring the model learns **anatomical features** (spine length, femur size, body proportions) rather than relying on image artifacts or cropping boundaries.
+## Key Features
 
-##  Key Features
+- **EfficientNetV2-S Backbone** with ImageNet pre-trained weights and configurable layer freezing for fine-tuning control
+- **Vertical Ruler Architecture** -- a 1x1 convolution compresses 1280 channels to 256, followed by adaptive vertical pooling into 16 zones, producing a 4096-dim feature vector that encodes the body's vertical structure
+- **Pixel Spacing Fusion** -- an MLP branch processes the physical `(x_spacing, y_spacing)` so the model understands real-world scale after resampling
+- **Smart Preprocessing Pipeline:**
+  - Bone Windowing (HU window: W=1800, L=400, range [-500, 1300])
+  - DICOM metadata-driven orientation correction (handles HFS/FFS and horizontal scans)
+  - Isotropic resampling to 1 mm/pixel before final resize to 384x384
+  - Dynamic padding with background-aware fill values
+- **Bias Mitigation** -- random vertical cropping (60-100% of body height) prevents the "Ruler Effect" where the model cheats by measuring padding borders
+- **Grad-CAM Interpretability** to verify the model attends to spine, pelvis, and shoulders
 
-* **Hybrid Architecture:** Fuses ResNet50 image features (2048-dim) with Pixel Spacing metadata (8-dim) for scale-aware predictions.
-* **Medical Transfer Learning:** Supports **RadImageNet** weights (pre-trained on 1.35M medical images) for better feature extraction compared to standard ImageNet.
-* **Smart Preprocessing:**
-* **Bone Windowing:** Applies specific Hounsfield Unit windows (W:1800, L:400) to highlight skeletal structures.
-* **Contour-Based Cropping:** Automatically removes table artifacts and empty space to center the patient.
+## Architecture
 
+```
+CT Localizer (1ch) --> repeat to 3ch --> EfficientNetV2-S features (1280ch, 12x12)
+                                              |
+                                         1x1 Conv (256ch)
+                                              |
+                                      Vertical Pool (16x1)
+                                              |
+                                        Flatten (4096)
+                                              |
+Pixel Spacing (2) --> MLP (2 --> 32 --> 8) ---+--- Concat (4104) --> FC (512) --> Dropout --> FC (1)
+                                                                                              |
+                                                                                        Height (cm)
+```
 
-* **Bias Mitigation:** Implements robust augmentations (`RandomResizedCrop`) to prevent the **"Ruler Effect"** (where the model cheats by measuring the black padding borders).
-* **Interpretability:** Integrated **Grad-CAM** visualization pipeline to verify the model is looking at the spine and pelvis.
+## Project Structure
 
-##  Data Structure
+```
+.
+|-- main.py                   # Entry point: runs the full cross-validation training pipeline
+|-- config.py                 # All hyperparameters, paths, and training configuration
+|-- model.py                  # HeightPredictor model (EfficientNetV2-S + Vertical Ruler + metadata fusion)
+|-- dataset.py                # LocalizerDataset: NIfTI loading, windowing, orientation, resampling, augmentation
+|-- Train.py                  # Training loop, evaluation, metrics (MAE, RMSE, median AE)
+|-- utils.py                  # Data loading, patient-level stratified CV splits, result saving
+|-- Inference.py              # HeightPredictor class for single/batch/ensemble inference
+|-- Visualization.py          # Grad-CAM, dataset samples, predictions, error distributions, scatter plots
+|-- Visualize.py              # CLI/interactive tool that ties all visualization modes together
+|-- PreprocessingVisualizer.py # Step-by-step visualization of the preprocessing pipeline
+|-- metadata.py               # Scans NIfTI/JSON files and exports scanner metadata to Excel
+```
 
-The project expects data in the following format:
+## Data Format
 
-* **Images:** NIfTI (`.nii` / `.nii.gz`) format 2D localizers.
-* **Metadata:** An Excel file containing `Patient_ID`, `Height` (target), and `Localizer_Path`.
+| Input | Format | Description |
+|-------|--------|-------------|
+| Images | NIfTI (`.nii` / `.nii.gz`) | 2D CT localizer scans with optional JSON sidecar for DICOM tags |
+| Metadata | Excel (`.xlsx`) | Must contain `Patient_ID`, `Height` (cm), and `Localizer_Path_NIfTI` columns |
 
-##  Methodology
+## Installation
 
-### 1. Preprocessing Pipeline
+```bash
+# Clone the repository
+git clone https://github.com/mohamed32145/Patient-Height-Prediction-from-CT-Localizers.git
+cd Patient-Height-Prediction-from-CT-Localizers
 
-1. **NIfTI Loading:** Handles 3D volumes by extracting the middle slice or performing Maximum Intensity Projection (MIP).
-2. **Windowing:** Clips intensities to `[-500, 1300]` HU to focus on bones.
-3. **Smart Crop:** Uses OpenCV contours to detect the body and crop out the CT table and background air.
+# Install dependencies
+pip install torch torchvision nibabel opencv-python albumentations pandas openpyxl numpy matplotlib
+```
 
-### 2. Model Architecture
+### Requirements
 
-We utilize a modified **ResNet50**:
+- Python 3.8+
+- PyTorch 2.0+
+- CUDA-capable GPU (recommended)
 
-* **Input:** 1-channel grayscale images are repeated to 3 channels to fit the ResNet architecture.
-* **Backbone:** ResNet50 (RadImageNet or ImageNet weights).
-* **Metadata Branch:** A small MLP processes the `(x_spacing, y_spacing)` tuple.
-* **Fusion:** Backbone features and Metadata features are concatenated before the final regression head.
+## Usage
 
-### 3. Solving the "Ruler Effect"
+### 1. Configure Paths
 
-Initial experiments showed the model "cheating" by measuring the distance between top/bottom padding.
+Edit [`config.py`](config.py) to set your data paths:
 
-* **Solution:** We implemented **RandomResizedCrop** during training. This forces the model to see random "zoomed-in" sections of the anatomy (e.g., just the torso), preventing it from seeing the scan edges. This forces the network to learn the *size* of anatomical structures (vertebrae, pelvis) to infer height.
+```python
+EXCEL_PATH = Path('path/to/your/patient_list.xlsx')
+NIFTI_ROOT = Path('path/to/your/nifti_localizers/')
+```
 
+### 2. Train
 
+```bash
+python main.py
+```
 
-##  Results & Visualization
+This runs 4-fold patient-level cross-validation with stratified height-balanced splits. Each fold trains for 100 epochs with cosine annealing LR scheduling. Results are saved to `training_results_rotating.xlsx` and per-fold predictions to `experiments_height_pytorch/`.
 
-* **Shortcuts Detected:** Early models focused on top/bottom edges (horizontal heatmap bars).
-* **Anatomy Learned:** After `RandomResizedCrop`, Grad-CAM heatmaps align with the **Spine**, **Pelvis**, and **Shoulders**, indicating true anatomical understanding.
+### 3. Inference
 
-##  Credits
+```bash
+python Inference.py --excel path/to/data.xlsx --model height_model_fold_1.pth --output predictions.xlsx
+```
 
-* **RadImageNet:** For the pre-trained medical backbone. [GitHub](https://github.com/BMEII-AI/RadImageNet)
-* **TorchXRayVision:** Used in early experiments for comparison. [GitHub](https://github.com/mlmed/torchxrayvision)
-* **Albumentations:** For the powerful image augmentation pipeline.
+### 4. Visualization
+
+```bash
+# View preprocessed dataset samples
+python Visualize.py --mode dataset --num-samples 5 --subset train
+
+# Visualize Grad-CAM attention maps
+python Visualize.py --mode gradcam --model height_model_fold_1.pth --num-samples 3
+
+# Plot training curves from results
+python Visualize.py --mode history --results training_results_rotating.xlsx
+
+# View step-by-step preprocessing pipeline
+python PreprocessingVisualizer.py
+```
+
+## Methodology
+
+### Preprocessing Pipeline
+
+1. **NIfTI Loading** -- extracts 2D slices from potentially 3D volumes (middle slice or MIP)
+2. **Bone Windowing** -- clips to [-500, 1300] HU to isolate skeletal structures
+3. **Orientation Correction** -- uses `ImageOrientationPatientDICOM` and `PatientPosition` from JSON sidecar to standardize vertical alignment
+4. **Random Vertical Crop** (training only) -- simulates partial scans by cropping 60-100% of the body height
+5. **Isotropic Resampling** -- resamples to 1 mm/pixel using the original NIfTI spacing, then resizes to 384x384 with updated spacing metadata
+
+### Cross-Validation
+
+Patient-level 4-fold CV with forced anchor patients per fold ensures:
+- No data leakage between splits (all images from one patient stay in the same split)
+- Height-stratified balancing across folds
+- Reproducible test/validation anchors for consistent benchmarking
+
+### Solving the "Ruler Effect"
+
+Early models learned a shortcut: measuring the distance between the top and bottom padding borders to estimate height. Grad-CAM showed horizontal heatmap bars at the scan edges.
+
+**Solution:** Random vertical cropping during training forces the model to see random sub-regions of the anatomy (e.g., just the torso). Since the crop boundaries no longer correlate with total height, the model must learn the *size* of anatomical structures (vertebrae, pelvis) to infer height. After applying this, Grad-CAM heatmaps shift to the **spine**, **pelvis**, and **shoulders**.
+
+## Training Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Backbone | EfficientNetV2-S (ImageNet pretrained) |
+| Input Size | 384 x 384 |
+| Optimizer | AdamW (lr=2e-4, weight_decay=1e-5) |
+| Scheduler | Cosine Annealing (eta_min=3e-5) |
+| Loss | MSE |
+| Batch Size | 16 |
+| Epochs | 100 |
+| Dropout | 0.2 |
+| Folds | 4 |
+
+## Credits
+
+- **[RadImageNet](https://github.com/BMEII-AI/RadImageNet)** -- pre-trained medical imaging backbone (explored in earlier experiments)
+- **[TorchXRayVision](https://github.com/mlmed/torchxrayvision)** -- used in early experiments for comparison
+- **[Albumentations](https://albumentations.ai/)** -- image augmentation pipeline
 
 ---
 
