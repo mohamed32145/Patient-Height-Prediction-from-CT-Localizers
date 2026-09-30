@@ -7,7 +7,7 @@ from pathlib import Path
 # PATH CONFIGURATION
 # ============================================================================
 BASE_DIR = Path(__file__).resolve().parent
-EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_expanded.xlsx'
+EXCEL_PATH = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/Patients_list_body_CT_localizers_updated_new_patients.xlsx'
 NIFTI_ROOT = BASE_DIR / 'C:/Users/Lab2/Desktop/mohamed sliman/rambam_nifti_localizers'
 EXPERIMENTS_DIR = BASE_DIR / 'experiments_height_pytorch'
 
@@ -58,7 +58,9 @@ DROPOUT_RATE = 0.2
 # TRAINING CONFIGURATION
 # ============================================================================
 # Cross-validation settings
+# Patient-level folds with the same height distribution (see utils.create_fold_splits_train_val_test)
 NUM_FOLDS = 4
+VAL_FRAC = 0.20  # fraction of all patients used for validation in each fold
 RANDOM_SEED = 42
 
 # Training hyperparameters
@@ -77,21 +79,6 @@ DEVICE = 'cuda'
 
 # Logging frequency (print every N epochs)
 LOG_FREQUENCY = 5
-
-# Forced fold assignment (strict patient-level CV anchors)
-FORCED_TEST_PATIENTS_BY_FOLD = {
-    0: 'C19',
-    1: 'C22',
-    2: 'C24',
-    3: 'C38'
-}
-
-FORCED_VAL_PATIENTS_BY_FOLD = {
-    0: 'C22',
-    1: 'C24',
-    2: 'C38',
-    3: 'C19'
-}
 
 
 # ============================================================================
@@ -113,6 +100,10 @@ RESULTS_EXCEL_PATH = 'training_results_rotating.xlsx'
 
 # Model checkpoint naming
 MODEL_CHECKPOINT_PATTERN = 'height_model_fold_{fold}.pth'
+
+# Height ranges (cm) for the per-range test error report, lower bound inclusive.
+# [160, 170, 180] -> <160, 160-170, 170-180, >=180
+HEIGHT_RANGE_EDGES_CM = [160, 170, 180]
 
 # ============================================================================
 # HELPER FUNCTIONS

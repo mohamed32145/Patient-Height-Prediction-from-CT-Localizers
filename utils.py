@@ -1,11 +1,11 @@
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 from config import (
     EXCEL_PATH, NIFTI_ROOT, REQUIRED_COLUMNS,
-    EXPERIMENTS_DIR, FORCED_TEST_PATIENTS_BY_FOLD, RANDOM_SEED
+    EXPERIMENTS_DIR, NUM_FOLDS, VAL_FRAC, RANDOM_SEED, HEIGHT_RANGE_EDGES_CM
 )
 
 
@@ -79,178 +79,121 @@ def prepare_dataset() -> pd.DataFrame:
     return data_df
 
 
-from typing import Tuple, List, Dict, Optional
-
-# Forced anchors for TEST per fold (required)
-FORCED_TEST_PATIENTS_BY_FOLD = {
-    0: 'C19',
-    1: 'C22',
-    2: 'C24',
-    3: 'C38'
-}
-
-def _derive_forced_val_from_test(forced_test_by_fold: Dict[int, str]) -> Dict[int, str]:
-    """
-    If user doesn't pass a val mapping, derive one so that:
-      - Each anchor appears exactly once as a val anchor across folds.
-      - The val anchor for fold f is different from the test anchor of fold f.
-    Strategy: rotate the test anchors by +1.
-    """
-    folds = sorted(forced_test_by_fold.keys())
-    ordered_anchors = [forced_test_by_fold[f] for f in folds]
-    rotated = ordered_anchors[1:] + ordered_anchors[:1]
-    return {f: v for f, v in zip(folds, rotated)}
-
-
-
-
-
-def _derive_forced_val_from_test(forced_test_by_fold: Dict[int, str]) -> Dict[int, str]:
-    """Rotate test anchors by +1 to auto-derive validation anchors."""
-    folds = sorted(forced_test_by_fold.keys())
-    ordered_anchors = [forced_test_by_fold[f] for f in folds]
-    rotated = ordered_anchors[1:] + ordered_anchors[:1]
-    return {f: v for f, v in zip(folds, rotated)}
-
 def create_fold_splits_train_val_test(
     data_df: pd.DataFrame,
-    num_folds: int = 4,
-    forced_test_patients_by_fold: Dict[int, str] = None,
-    forced_val_patients_by_fold: Optional[Dict[int, str]] = None,
-    test_frac: float = 0.25,
-    val_frac: float = 0.20,
-    random_seed: int = 42,
-    n_strata_bins: int = 4
+    num_folds: int = NUM_FOLDS,
+    val_frac: float = VAL_FRAC,
+    random_seed: int = RANDOM_SEED
 ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], np.ndarray]:
     """
-    Build 4 folds with:
-      • Exactly one forced anchor in TEST for that fold.
-      • Exactly one (different) forced anchor in VAL for that fold.
-      • The remaining two anchors in TRAIN for that fold.
-      • Non-anchors stratified by height and balanced to reach target sizes.
+    Patient-level K-fold split where every fold has the same height distribution.
+
+      • TEST: patients are sorted by height and taken in consecutive blocks of
+        num_folds. Each block puts exactly one patient into every fold, so each
+        fold gets one patient from every narrow height band. Inside a block, the
+        patient with the most images goes to the fold with the fewest images so
+        far, which keeps the image counts balanced too.
+      • VAL: val_frac of all patients, taken from this fold's non-test patients:
+        one from each equal slice of the height-sorted list, so validation also
+        covers the whole height range.
+      • TRAIN: all remaining patients.
 
     Returns:
       test_groups, val_groups, train_groups, all_patient_ids
     """
-    if num_folds != 4:
-        raise ValueError("This project currently expects NUM_FOLDS=4.")
-    if forced_test_patients_by_fold is None:
-        raise ValueError("forced_test_patients_by_fold is required.")
-
-    folds = list(range(num_folds))
-    if sorted(forced_test_patients_by_fold.keys()) != folds:
-        raise ValueError("forced_test_patients_by_fold must have keys 0..num_folds-1.")
-
-    if forced_val_patients_by_fold is None:
-        forced_val_patients_by_fold = _derive_forced_val_from_test(forced_test_patients_by_fold)
-    if sorted(forced_val_patients_by_fold.keys()) != folds:
-        raise ValueError("forced_val_patients_by_fold must have keys 0..num_folds-1.")
-    for f in folds:
-        if forced_val_patients_by_fold[f] == forced_test_patients_by_fold[f]:
-            raise ValueError(f"Fold {f}: test and val anchors must be different.")
-
-    # Aggregate to per-patient mean height
-    patient_df = data_df.groupby('Patient_ID', as_index=False)['height_cm'].mean()
+    # One row per patient: mean height and number of images
+    patient_df = data_df.groupby('Patient_ID', as_index=False).agg(
+        height_cm=('height_cm', 'mean'),
+        n_images=('height_cm', 'size')
+    )
     all_patient_ids = patient_df['Patient_ID'].to_numpy()
 
-    # Targets
-    total_patients = len(all_patient_ids)
-    target_test = [int(round(test_frac * total_patients)) for _ in folds]  # ~10–11 for 42
-    target_val  = [int(round(val_frac  * total_patients)) for _ in folds]  # ~8–9  for 42
+    n_patients = len(patient_df)
+    if n_patients < num_folds:
+        raise ValueError(f"Need at least {num_folds} patients for {num_folds} folds, got {n_patients}.")
+    n_val = int(round(val_frac * n_patients))
+    min_non_test = n_patients - int(np.ceil(n_patients / num_folds))
+    if not 1 <= n_val < min_non_test:
+        raise ValueError(f"val_frac={val_frac} gives {n_val} validation patients; "
+                         f"must be between 1 and {min_non_test - 1}.")
 
-    anchors_all = set(list(forced_test_patients_by_fold.values()) +
-                      list(forced_val_patients_by_fold.values()))
     rng = np.random.default_rng(random_seed)
 
-    # ---- TEST: seed forced anchor per fold, then fill with non-anchors ----
-    test_groups: List[List[object]] = [[forced_test_patients_by_fold[f]] for f in folds]
-    non_anchor_df = patient_df[~patient_df['Patient_ID'].isin(anchors_all)].copy()
-    if not non_anchor_df.empty:
-        n_bins_eff = min(n_strata_bins, non_anchor_df['height_cm'].nunique())
-        if n_bins_eff > 1:
-            non_anchor_df['height_bin'] = pd.qcut(
-                non_anchor_df['height_cm'],
-                q=n_bins_eff, labels=False, duplicates='drop'
-            )
-        else:
-            non_anchor_df['height_bin'] = 0
+    # Sort by height; shuffling first breaks ties between equal heights at random
+    patient_df = patient_df.iloc[rng.permutation(n_patients)]
+    patient_df = patient_df.sort_values('height_cm', kind='stable').reset_index(drop=True)
+    ids = patient_df['Patient_ID'].to_numpy()
+    n_images = patient_df['n_images'].to_numpy()
 
-        for _, grp in non_anchor_df.groupby('height_bin'):
-            ids = grp['Patient_ID'].tolist()
-            rng.shuffle(ids)
-            for pid in ids:
-                # Prefer fold with smallest test size if still under target
-                target_fold = int(np.argmin([len(g) for g in test_groups]))
-                if len(test_groups[target_fold]) < target_test[target_fold]:
-                    test_groups[target_fold].append(pid)
-                else:
-                    # If targets met, still assign to the smallest to finish (rare)
-                    alt_fold = int(np.argmin([len(g) for g in test_groups]))
-                    test_groups[alt_fold].append(pid)
+    # ---- TEST: each block of num_folds consecutive heights gives one patient to every fold ----
+    test_fold = np.empty(n_patients, dtype=int)
+    fold_patients = np.zeros(num_folds, dtype=int)
+    fold_images = np.zeros(num_folds, dtype=int)
+    for start in range(0, n_patients, num_folds):
+        block = np.arange(start, min(start + num_folds, n_patients))
+        # Patients with the most images first ...
+        block = block[np.argsort(-n_images[block], kind='stable')]
+        # ... go to the folds with the fewest patients, then fewest images (random tie-break)
+        fold_order = np.lexsort((rng.random(num_folds), fold_images, fold_patients))
+        for i, f in zip(block, fold_order):
+            test_fold[i] = f
+            fold_patients[f] += 1
+            fold_images[f] += n_images[i]
 
-    # ---- VAL: per fold, seed forced val anchor, then fill up to target with non-anchors not in this fold’s TEST ----
-    val_groups: List[List[object]] = [[forced_val_patients_by_fold[f]] for f in folds]
-    for f in folds:
-        test_set_f = set(test_groups[f])
-        # Eligible: non-anchors NOT in this fold's TEST
-        eligible_df = patient_df[
-            (~patient_df['Patient_ID'].isin(anchors_all)) &
-            (~patient_df['Patient_ID'].isin(test_set_f))
-        ].copy()
+    test_groups, val_groups, train_groups = [], [], []
+    for f in range(num_folds):
+        # ---- VAL: one random patient from each height slice of the non-test patients ----
+        non_test = np.flatnonzero(test_fold != f)  # still sorted by height
+        bounds = np.round(np.linspace(0, len(non_test), n_val + 1)).astype(int)
+        val_idx = [rng.choice(non_test[lo:hi]) for lo, hi in zip(bounds[:-1], bounds[1:])]
 
-        if not eligible_df.empty:
-            n_bins_eff = min(n_strata_bins, eligible_df['height_cm'].nunique())
-            if n_bins_eff > 1:
-                eligible_df['height_bin'] = pd.qcut(
-                    eligible_df['height_cm'],
-                    q=n_bins_eff, labels=False, duplicates='drop'
-                )
-            else:
-                eligible_df['height_bin'] = 0
+        # ---- TRAIN = complement ----
+        train_mask = test_fold != f
+        train_mask[val_idx] = False
 
-            needed = max(target_val[f] - len(val_groups[f]), 0)
-
-            # Greedy bin-cycled pick until target reached
-            bin_to_ids = {b: grp['Patient_ID'].tolist() for b, grp in eligible_df.groupby('height_bin')}
-            for b in bin_to_ids:
-                rng.shuffle(bin_to_ids[b])
-
-            bins_order = list(bin_to_ids.keys())
-            idx_per_bin = {b: 0 for b in bins_order}
-            picked = 0
-            while picked < needed and bins_order:
-                exhausted = []
-                for b in bins_order:
-                    ids_list = bin_to_ids[b]
-                    i = idx_per_bin[b]
-                    if i < len(ids_list):
-                        val_groups[f].append(ids_list[i])
-                        idx_per_bin[b] += 1
-                        picked += 1
-                        if picked >= needed:
-                            break
-                    else:
-                        exhausted.append(b)
-                if exhausted:
-                    bins_order = [b for b in bins_order if b not in exhausted]
-
-    # ---- TRAIN = complement per fold ----
-    all_set = set(all_patient_ids)
-    test_groups = [np.array(sorted(g), dtype=object) for g in test_groups]
-    val_groups  = [np.array(sorted(g), dtype=object) for g in val_groups]
-    train_groups = []
-    for f in folds:
-        train_f = np.array(sorted(all_set - set(test_groups[f]) - set(val_groups[f])), dtype=object)
-        train_groups.append(train_f)
-
-    # Anchors sanity: 1 in test, 1 in val, other 2 in train
-    for f in folds:
-        assert forced_test_patients_by_fold[f] in set(test_groups[f])
-        assert forced_val_patients_by_fold[f]  in set(val_groups[f])
-        others = anchors_all - {forced_test_patients_by_fold[f], forced_val_patients_by_fold[f]}
-        assert others.issubset(set(train_groups[f]))
+        test_groups.append(np.array(sorted(ids[test_fold == f]), dtype=object))
+        val_groups.append(np.array(sorted(ids[val_idx]), dtype=object))
+        train_groups.append(np.array(sorted(ids[train_mask]), dtype=object))
 
     return test_groups, val_groups, train_groups, all_patient_ids
+
+
+def assign_height_range(heights: pd.Series, edges: List[float] = HEIGHT_RANGE_EDGES_CM) -> pd.Series:
+    """Bin heights (cm) into <e0, e0-e1, ..., >=eN (lower bound inclusive)."""
+    labels = ([f"<{edges[0]:g}"] +
+              [f"{lo:g}-{hi:g}" for lo, hi in zip(edges[:-1], edges[1:])] +
+              [f">={edges[-1]:g}"])
+    return pd.cut(heights, bins=[-np.inf, *edges, np.inf], labels=labels, right=False)
+
+
+def summarize_fold_splits(
+    data_df: pd.DataFrame,
+    test_groups: List[np.ndarray],
+    val_groups: List[np.ndarray],
+    train_groups: List[np.ndarray]
+) -> pd.DataFrame:
+    """Per fold and subset: patient/image counts, height stats and patients per height range."""
+    patient_heights = data_df.groupby('Patient_ID')['height_cm'].mean()
+    images_per_patient = data_df.groupby('Patient_ID').size()
+
+    rows = []
+    for f in range(len(test_groups)):
+        for subset, ids in (('Train', train_groups[f]), ('Val', val_groups[f]), ('Test', test_groups[f])):
+            heights = patient_heights.loc[ids]
+            row = {
+                'Fold': f + 1,
+                'Subset': subset,
+                'Patients': len(ids),
+                'Images': int(images_per_patient.loc[ids].sum()),
+                'Height_Mean': heights.mean(),
+                'Height_SD': heights.std(),
+                'Height_Min': heights.min(),
+                'Height_Max': heights.max(),
+            }
+            row.update(assign_height_range(heights).value_counts(sort=False).to_dict())
+            rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 
@@ -296,7 +239,47 @@ def get_fold_dataframes_explicit(
 
 
 
-def save_results_to_excel(all_results: list, fold_performance: list, output_path: str):
+def compute_height_range_errors(predictions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test error per true-height range, plus an 'All' row for everyone together.
+
+    predictions_df: one row per image with Patient_ID, height_cm and Predicted_Height
+    (as returned by save_fold_predictions; concatenate the folds for the pooled report).
+    Bias_cm is the mean of (predicted - true): negative means height is underestimated.
+    """
+    errors = predictions_df['Predicted_Height'] - predictions_df['height_cm']
+    height_ranges = assign_height_range(predictions_df['height_cm'])
+
+    groups = [(label, height_ranges == label) for label in height_ranges.cat.categories]
+    groups.append(('All', pd.Series(True, index=predictions_df.index)))
+
+    rows = []
+    for label, mask in groups:
+        rows.append({
+            'Height_Range': label,
+            'Patients': predictions_df.loc[mask, 'Patient_ID'].nunique(),
+            'Images': int(mask.sum()),
+            'MAE_cm': errors[mask].abs().mean(),
+            'Bias_cm': errors[mask].mean(),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def print_height_range_errors(range_errors: pd.DataFrame, title: str):
+    print(f"\n{title}:")
+    table = range_errors.to_string(index=False, float_format=lambda v: f"{v:.2f}", na_rep='-')
+    for line in table.splitlines():
+        print(f"  {line}")
+    print("  (Bias = mean of predicted - true; negative = underestimated)")
+
+
+def save_results_to_excel(
+        all_results: list,
+        fold_performance: list,
+        output_path: str,
+        height_range_errors: Optional[pd.DataFrame] = None
+):
     results_df = pd.DataFrame(all_results)
     summary_df = pd.DataFrame({
         'Fold': range(1, len(fold_performance) + 1),
@@ -306,6 +289,8 @@ def save_results_to_excel(all_results: list, fold_performance: list, output_path
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         results_df.to_excel(writer, sheet_name='Detailed_Logs', index=False)
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        if height_range_errors is not None:
+            height_range_errors.to_excel(writer, sheet_name='Height_Range_MAE', index=False)
 
     print(f"\nResults saved to '{output_path}'")
     print(f"Average TEST MAE: {np.mean(fold_performance):.2f} ± {np.std(fold_performance):.2f} cm")
@@ -316,7 +301,7 @@ def save_fold_predictions(
         predictions: np.ndarray,
         fold_idx: int,
         output_dir: str = "experiments_height_pytorch"
-):
+) -> pd.DataFrame:
     results_df = test_df.copy()
     results_df['Predicted_Height'] = predictions.flatten()
 
@@ -339,3 +324,5 @@ def save_fold_predictions(
 
     results_df.to_csv(out_file, index=False)
     print(f"  -> Saved patient-level predictions to {out_file.name}")
+
+    return results_df

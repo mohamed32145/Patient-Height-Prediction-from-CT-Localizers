@@ -2,15 +2,19 @@
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
+import pandas as pd
 
 from config import (
     NUM_FOLDS, BATCH_SIZE, RESULTS_EXCEL_PATH,DROPOUT_RATE,
-    setup_directories, get_device,EXPERIMENTS_DIR,FORCED_TEST_PATIENTS_BY_FOLD,FORCED_VAL_PATIENTS_BY_FOLD
+    setup_directories, get_device,EXPERIMENTS_DIR
 )
 from utils import (
     prepare_dataset,
     create_fold_splits_train_val_test,
+    summarize_fold_splits,
     get_fold_dataframes_explicit,
+    compute_height_range_errors,
+    print_height_range_errors,
     save_results_to_excel,
     save_fold_predictions
 )
@@ -21,12 +25,12 @@ from Train import train_fold, compute_metrics, print_metrics
 
 def main():
     """
-    Main training pipeline with rotating cross-validation.
+    Main training pipeline with height-stratified cross-validation.
 
-    This implements a 4-fold rotating CV where:
-    - Group i         -> TEST (Held out completely)
-    - Group (i+1)%4   -> VALIDATION (Used for model tuning)
-    - Remaining 2     -> TRAIN
+    Patients are split into 4 folds with the same height distribution. In fold i:
+    - Fold i                                      -> TEST (Held out completely)
+    - VAL_FRAC of all patients, from other folds  -> VALIDATION (Used for model tuning)
+    - Remaining patients                          -> TRAIN
     """
 
     # Setup
@@ -53,23 +57,25 @@ def main():
 
     test_groups, val_groups, train_groups, all_patient_ids = create_fold_splits_train_val_test(
         data_df=data_df,
-        num_folds=NUM_FOLDS,
-        forced_test_patients_by_fold=FORCED_TEST_PATIENTS_BY_FOLD,
-        forced_val_patients_by_fold=FORCED_VAL_PATIENTS_BY_FOLD,  # optional; can omit to auto-derive
-        test_frac=0.25,
-        val_frac=0.20,
-        random_seed=42
+        num_folds=NUM_FOLDS
     )
 
+    split_summary = summarize_fold_splits(data_df, test_groups, val_groups, train_groups)
+    print(split_summary.to_string(index=False, float_format=lambda v: f"{v:.1f}"))
+    split_summary_path = EXPERIMENTS_DIR / 'cv_split_summary.csv'
+    split_summary.round(2).to_csv(split_summary_path, index=False)
+    print(f"  -> Saved split summary to {split_summary_path.name}")
+
     # ========================================================================
-    # 3. ROTATING CROSS-VALIDATION LOOP
+    # 3. CROSS-VALIDATION LOOP
     # ========================================================================
-    print("\nStep 3: Training with rotating cross-validation...")
+    print("\nStep 3: Training with height-stratified cross-validation...")
     print("-" * 80)
 
     fold_performance = []
     all_results = []
     all_histories = []
+    all_test_predictions = []
 
     for fold_idx in range(NUM_FOLDS):
         # Get train/val/test splits for this fold
@@ -122,7 +128,8 @@ def main():
             device=device,
             fold_idx=fold_idx
         )
-        save_fold_predictions(test_df, history['test_predictions'], fold_idx, str(EXPERIMENTS_DIR))
+        fold_predictions = save_fold_predictions(test_df, history['test_predictions'], fold_idx, str(EXPERIMENTS_DIR))
+        all_test_predictions.append(fold_predictions)
         # Store results
         fold_performance.append(history['test_mae'])
         all_histories.append(history)
@@ -156,6 +163,10 @@ def main():
             history['test_labels']
         )
         print_metrics(metrics, title=f"Fold {fold_idx + 1} Test Metrics")
+        print_height_range_errors(
+            compute_height_range_errors(fold_predictions),
+            title=f"Fold {fold_idx + 1} Test Error by Height Range"
+        )
 
     # ========================================================================
     # 4. SAVE RESULTS AND SUMMARY
@@ -175,9 +186,18 @@ def main():
     print(f"  Min Test MAE: {np.min(fold_performance):.2f} cm")
     print(f"  Max Test MAE: {np.max(fold_performance):.2f} cm")
 
+    # Each patient is in exactly one test fold, so pooling the folds scores the whole group once
+    all_predictions = pd.concat(all_test_predictions, ignore_index=True)
+    print(f"\nAll {all_predictions['Patient_ID'].nunique()} Patients Together "
+          f"({len(all_predictions)} test images from the {NUM_FOLDS} folds):")
+    print(f"  Test MAE: {all_predictions['Absolute_Error'].mean():.2f} cm")
+
+    height_range_errors = compute_height_range_errors(all_predictions)
+    print_height_range_errors(height_range_errors, title="Test Error by Height Range (all folds together)")
+
     # Save results to Excel
     print(f"\nSaving results to {RESULTS_EXCEL_PATH}...")
-    save_results_to_excel(all_results, fold_performance, RESULTS_EXCEL_PATH)
+    save_results_to_excel(all_results, fold_performance, RESULTS_EXCEL_PATH, height_range_errors)
 
     print("\n" + "=" * 80)
     print("TRAINING COMPLETE!")

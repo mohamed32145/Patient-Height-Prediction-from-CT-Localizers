@@ -46,7 +46,7 @@ Pixel Spacing (2) --> MLP (2 --> 32 --> 8) ---+--- Concat (4104) --> FC (512) --
 |-- model.py                  # HeightPredictor model (EfficientNetV2-S + Vertical Ruler + metadata fusion)
 |-- dataset.py                # LocalizerDataset: NIfTI loading, windowing, orientation, resampling, augmentation
 |-- Train.py                  # Training loop, evaluation, metrics (MAE, RMSE, median AE)
-|-- utils.py                  # Data loading, patient-level stratified CV splits, result saving
+|-- utils.py                  # Data loading, height-stratified patient-level CV splits, per-height-range error report, result saving
 |-- Inference.py              # HeightPredictor class for single/batch/ensemble inference
 |-- Visualization.py          # Grad-CAM, dataset samples, predictions, error distributions, scatter plots
 |-- Visualize.py              # CLI/interactive tool that ties all visualization modes together
@@ -95,7 +95,7 @@ NIFTI_ROOT = Path('path/to/your/nifti_localizers/')
 python main.py
 ```
 
-This runs 4-fold patient-level cross-validation with stratified height-balanced splits. Each fold trains for 100 epochs with cosine annealing LR scheduling. Results are saved to `training_results_rotating.xlsx` and per-fold predictions to `experiments_height_pytorch/`.
+This runs 4-fold patient-level cross-validation with height-balanced folds. Each fold trains for 100 epochs with cosine annealing LR scheduling. Results (including the per-height-range error report) are saved to `training_results_rotating.xlsx`, and the split summary and per-fold predictions to `experiments_height_pytorch/`.
 
 ### 3. Inference
 
@@ -131,10 +131,15 @@ python PreprocessingVisualizer.py
 
 ### Cross-Validation
 
-Patient-level 4-fold CV with forced anchor patients per fold ensures:
-- No data leakage between splits (all images from one patient stay in the same split)
-- Height-stratified balancing across folds
-- Reproducible test/validation anchors for consistent benchmarking
+Patient-level 4-fold CV where every fold has the same height distribution:
+- **Test folds** -- patients are sorted by height and taken in consecutive blocks of 4; each block puts exactly one patient into each fold, so every fold covers the full height range equally. Inside a block, patients with more localizers go to the fold with fewer images, which keeps image counts balanced too.
+- **Validation** -- in each fold, 20% of all patients (`VAL_FRAC`) are taken from the non-test patients, one from each slice of the height-sorted list; the rest are used for training (~55% train / 20% val / 25% test).
+- No data leakage between splits (all images from one patient stay in the same split), and the split is reproducible from `RANDOM_SEED`.
+- The patient/image counts, height mean/SD/range and patients per height range of every fold are printed at the start of training and saved to `experiments_height_pytorch/cv_split_summary.csv`.
+
+### Evaluation by Height Range
+
+Every patient is in exactly one test fold, so the 4 test folds are pooled to score the whole group once. The report gives the **MAE for all patients together** and, for each height range (`HEIGHT_RANGE_EDGES_CM`, default `<160`, `160-170`, `170-180`, `>=180` cm), the number of patients and images, the MAE and the bias (mean of predicted - true). It is printed after every fold and for all folds together, and saved to the `Height_Range_MAE` sheet of `training_results_rotating.xlsx`.
 
 ### Solving the "Ruler Effect"
 
